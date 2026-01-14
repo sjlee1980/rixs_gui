@@ -38,7 +38,7 @@ except ImportError:
 class RIXSGui(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("RIXS Analyzer: 3-Pane Layout & ROI Lines")
+        self.setWindowTitle("RIXS Analyzer: Stable Colorbar & Auto-Update")
         self.setGeometry(50, 50, 1600, 1000)
         self.raw_data = {}
         
@@ -104,12 +104,12 @@ class RIXSGui(QMainWindow):
         
         roi_pfy_layout.addWidget(QLabel("Start:"), 0, 0)
         self.roi_pfy_start = QLineEdit("0")
-        self.roi_pfy_start.returnPressed.connect(self.update_plots)
+        self.roi_pfy_start.editingFinished.connect(self.update_plots) # Updates on Enter or Click away
         roi_pfy_layout.addWidget(self.roi_pfy_start, 0, 1)
         
         roi_pfy_layout.addWidget(QLabel("End:"), 1, 0)
         self.roi_pfy_end = QLineEdit("1000")
-        self.roi_pfy_end.returnPressed.connect(self.update_plots)
+        self.roi_pfy_end.editingFinished.connect(self.update_plots)
         roi_pfy_layout.addWidget(self.roi_pfy_end, 1, 1)
         
         roi_pfy_group.setLayout(roi_pfy_layout)
@@ -121,12 +121,12 @@ class RIXSGui(QMainWindow):
         
         roi_xes_layout.addWidget(QLabel("Start:"), 0, 0)
         self.roi_xes_start = QLineEdit("0")
-        self.roi_xes_start.returnPressed.connect(self.update_plots)
+        self.roi_xes_start.editingFinished.connect(self.update_plots)
         roi_xes_layout.addWidget(self.roi_xes_start, 0, 1)
         
         roi_xes_layout.addWidget(QLabel("End:"), 1, 0)
         self.roi_xes_end = QLineEdit("2000")
-        self.roi_xes_end.returnPressed.connect(self.update_plots)
+        self.roi_xes_end.editingFinished.connect(self.update_plots)
         roi_xes_layout.addWidget(self.roi_xes_end, 1, 1)
         
         roi_xes_group.setLayout(roi_xes_layout)
@@ -140,14 +140,16 @@ class RIXSGui(QMainWindow):
         
         # GridSpec Layout: 
         # Top row: PFY (long)
-        # Bottom row: Map (left) + XES (right)
-        self.gs = gridspec.GridSpec(2, 2, width_ratios=[4, 1], height_ratios=[1, 4], 
-                                    wspace=0.05, hspace=0.05)
+        # Bottom row: Map (left) + XES (right) + Colorbar (far right)
+        # width_ratios: [Map, XES, Colorbar]
+        self.gs = gridspec.GridSpec(2, 3, width_ratios=[4, 1.2, 0.2], height_ratios=[1, 4], 
+                                    wspace=0.1, hspace=0.1)
 
         # Create Axes
         self.ax_pfy = self.figure.add_subplot(self.gs[0, 0])
         self.ax_map = self.figure.add_subplot(self.gs[1, 0], sharex=self.ax_pfy)
         self.ax_xes = self.figure.add_subplot(self.gs[1, 1], sharey=self.ax_map)
+        self.cax = self.figure.add_subplot(self.gs[1, 2]) # Permanent Colorbar Axis
         
         # Turn off redundant tick labels for shared axes
         plt.setp(self.ax_pfy.get_xticklabels(), visible=False)
@@ -181,7 +183,8 @@ class RIXSGui(QMainWindow):
                 for scan_name in data.keys():
                     if isinstance(data[scan_name], dict):
                         scan_item = QTreeWidgetItem(file_item)
-                        scan_item.setText(0, scan_name)
+                        # FIXED: Convert integer scan_name to string to prevent crash
+                        scan_item.setText(0, str(scan_name))
                         scan_item.setData(0, Qt.ItemDataRole.UserRole, (fname, scan_name))
             except Exception as e:
                 print(f"Error loading {f}: {e}")
@@ -200,6 +203,7 @@ class RIXSGui(QMainWindow):
             if not user_data: continue
             
             fname, sname = user_data
+            if fname not in self.raw_data: continue
             rixs = self.raw_data[fname][sname]
 
             #
@@ -215,6 +219,7 @@ class RIXSGui(QMainWindow):
                 common_x = x
                 common_y = y
             else:
+                # Simple check for shape compatibility
                 if z.shape == summed_z.shape:
                     summed_z += z
 
@@ -229,10 +234,13 @@ class RIXSGui(QMainWindow):
         try:
             # PFY ROI (Emission / Y-Axis)
             y_min, y_max = data['y'][0], data['y'][-1]
-            if y_min > y_max: y_min, y_max = y_max, y_min # Ensure order
+            if y_min > y_max: y_min, y_max = y_max, y_min
             
-            roi_y_start = float(self.roi_pfy_start.text())
-            roi_y_end = float(self.roi_pfy_end.text())
+            try: roi_y_start = float(self.roi_pfy_start.text())
+            except: roi_y_start = 0.0
+            
+            try: roi_y_end = float(self.roi_pfy_end.text())
+            except: roi_y_end = 1000.0
             
             # Initial setup or "Full Range" check
             if roi_y_start == 0 and roi_y_end == 1000:
@@ -250,8 +258,11 @@ class RIXSGui(QMainWindow):
 
             # XES ROI (Excitation / X-Axis)
             x_min, x_max = data['x'][0], data['x'][-1]
-            roi_x_start = float(self.roi_xes_start.text())
-            roi_x_end = float(self.roi_xes_end.text())
+            try: roi_x_start = float(self.roi_xes_start.text())
+            except: roi_x_start = 0.0
+            
+            try: roi_x_end = float(self.roi_xes_end.text())
+            except: roi_x_end = 2000.0
 
             if roi_x_start == 0 and roi_x_end == 2000:
                 roi_x_start, roi_x_end = x_min, x_max
@@ -259,74 +270,58 @@ class RIXSGui(QMainWindow):
                 self.roi_xes_end.setText(f"{x_max:.2f}")
 
         except ValueError:
-            return # Wait for valid input
+            return 
 
         # 2. Plot Map (Center)
-        # Save zoom state if exists, else auto
-        # We re-plot only if necessary, but for simplicity here we clear/redraw.
-        # For performance with sliders, we might optimize later.
         self.ax_map.clear()
         self.map_img = self.ax_map.pcolormesh(data['x'], data['y'], data['z'].T, shading='auto', 
                                               cmap=self.cmap_combo.currentText())
         
-        # Add ROI Lines to Map
-        # PFY Lines (Horizontal - Green)
+        # Add ROI Lines
         self.ax_map.axhline(roi_y_start, color='lime', linestyle='--', linewidth=1, alpha=0.7)
         self.ax_map.axhline(roi_y_end, color='lime', linestyle='--', linewidth=1, alpha=0.7)
-        
-        # XES Lines (Vertical - Cyan)
         self.ax_map.axvline(roi_x_start, color='cyan', linestyle='--', linewidth=1, alpha=0.7)
         self.ax_map.axvline(roi_x_end, color='cyan', linestyle='--', linewidth=1, alpha=0.7)
 
-        # 3. Plot PFY (Top) - Integration along Emission Axis (Y)
+        # 3. Plot PFY (Top)
         self.ax_pfy.clear()
-        # Find indices
         idx_y_i = np.argmin(np.abs(data['y'] - roi_y_start))
         idx_y_f = np.argmin(np.abs(data['y'] - roi_y_end))
-        # Sum between indices
         pfy_curve = np.sum(data['z'][:, min(idx_y_i, idx_y_f):max(idx_y_i, idx_y_f)], axis=1)
         self.ax_pfy.plot(data['x'], pfy_curve, color='lime')
         self.ax_pfy.set_ylabel("PFY")
-        plt.setp(self.ax_pfy.get_xticklabels(), visible=False) # Hide X labels
+        plt.setp(self.ax_pfy.get_xticklabels(), visible=False)
 
-        # 4. Plot XES (Right) - Integration along Excitation Axis (X)
+        # 4. Plot XES (Right)
         self.ax_xes.clear()
-        # Find indices
         idx_x_i = np.argmin(np.abs(data['x'] - roi_x_start))
         idx_x_f = np.argmin(np.abs(data['x'] - roi_x_end))
-        # Sum Z along axis 0 (Excitation)
         xes_curve = np.sum(data['z'][min(idx_x_i, idx_x_f):max(idx_x_i, idx_x_f), :], axis=0)
-        # Plot Y vs X (rotated)
         self.ax_xes.plot(xes_curve, data['y'], color='cyan') 
         self.ax_xes.set_xlabel("XES")
-        plt.setp(self.ax_xes.get_yticklabels(), visible=False) # Hide Y labels
+        plt.setp(self.ax_xes.get_yticklabels(), visible=False)
 
-        # 5. Refresh Colorbar
-        if self.cbar: 
-            self.cbar.remove()
-        self.cbar = self.figure.colorbar(self.map_img, ax=self.ax_xes, location='right', pad=0.1)
+        # 5. Stable Colorbar Update
+        # Instead of creating/removing, we just update the mappable inside the permanent axis
+        self.cax.clear()
+        self.cbar = self.figure.colorbar(self.map_img, cax=self.cax, orientation='vertical')
         
-        # Apply Slider Values
         self.update_color_scale() # Apply contrast
-        
         self.canvas.draw()
 
     def update_color_scale(self):
         if self.map_img is None: return
         
-        # Get raw data limits from the image object
         raw_data = self.map_img.get_array()
         d_min, d_max = np.min(raw_data), np.max(raw_data)
         
-        # Sliders are 0-100% of the range
         s_min = self.slider_min.value() / 100.0
         s_max = self.slider_max.value() / 100.0
         
-        # Calculate new vmin/vmax
         new_vmin = d_min + (d_max - d_min) * s_min
         new_vmax = d_min + (d_max - d_min) * s_max
         
-        if new_vmin >= new_vmax: new_vmax = new_vmin + 1e-6 # Prevent crash
+        if new_vmin >= new_vmax: new_vmax = new_vmin + 1e-6
         
         self.map_img.set_clim(new_vmin, new_vmax)
         self.canvas.draw()
