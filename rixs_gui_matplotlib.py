@@ -11,6 +11,13 @@ from matplotlib.widgets import RectangleSelector
 # Suppress NumPy deprecation warnings from unpickling older data
 warnings.filterwarnings("ignore", category=DeprecationWarning, module="numpy")
 
+# Fix for NumPy 2.0 unpickling legacy NumPy 1.x data (e.g., .pkl.gz)
+if np.__version__.startswith("2."):
+    import numpy._core as _core
+    sys.modules["numpy.core"] = _core
+    sys.modules["numpy.core.numeric"] = _core.numeric
+    sys.modules["numpy.core.multiarray"] = _core.multiarray
+
 # --- Python 2/3 Pickle Compatibility ---
 try:
     import cPickle
