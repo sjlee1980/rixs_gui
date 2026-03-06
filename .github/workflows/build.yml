@@ -31,16 +31,13 @@ jobs:
         pip install pyinstaller PyQt6 matplotlib numpy
 
     - name: Build with PyInstaller
-      # --noconfirm: Overwrite existing dist folder
-      # --onefile: Create a single executable
-      # --windowed: Prevent a console window from popping up (for GUI apps)
-      # --collect-submodules: Ensures all of PyQt6 is captured
+      shell: bash
       run: |
-        pyinstaller --name "RIXS_Analyzer" \
-                    --onefile \
-                    --windowed \
-                    --collect-submodules PyQt6 \
-                    rixs_gui_matplotlib.py
+        if [ "${{ matrix.os }}" = "ubuntu-latest" ]; then
+          xvfb-run pyinstaller --name "RIXS_Analyzer" --onefile --windowed --collect-submodules PyQt6 rixs_gui_matplotlib.py
+        else
+          pyinstaller --name "RIXS_Analyzer" --onefile --windowed --collect-submodules PyQt6 rixs_gui_matplotlib.py
+        fi
 
     - name: Upload Artifacts
       uses: actions/upload-artifact@v4
