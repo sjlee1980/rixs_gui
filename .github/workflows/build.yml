@@ -1,0 +1,50 @@
+name: Build RIXS GUI Executables
+
+on:
+  push:
+    branches: [ "main", "master" ]
+  workflow_dispatch: 
+
+jobs:
+  build:
+    name: Build on ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        # Building for Linux, macOS, and Windows
+        os: [ubuntu-latest, macos-latest, windows-latest]
+
+    steps:
+    - name: Checkout Code
+      uses: actions/checkout@v4
+
+    - name: Set up Python 3.11
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.11'
+
+    - name: Install Dependencies
+      # We install PyQt6 as the primary target for the build
+      # PyInstaller will bundle the one it finds in this environment
+      run: |
+        python -m pip install --upgrade pip
+        pip install pyinstaller PyQt6 matplotlib numpy
+
+    - name: Build with PyInstaller
+      # --noconfirm: Overwrite existing dist folder
+      # --onefile: Create a single executable
+      # --windowed: Prevent a console window from popping up (for GUI apps)
+      # --collect-submodules: Ensures all of PyQt6 is captured
+      run: |
+        pyinstaller --name "RIXS_Analyzer" \
+                    --onefile \
+                    --windowed \
+                    --collect-submodules PyQt6 \
+                    rixs_gui_matplotlib.py
+
+    - name: Upload Artifacts
+      uses: actions/upload-artifact@v4
+      with:
+        name: RIXS_Analyzer-${{ matrix.os }}
+        path: dist/*
+        retention-days: 7
