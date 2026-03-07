@@ -8,7 +8,8 @@ on:
 jobs:
   build:
     name: Build on ${{ matrix.os }}
-    runs-on: ${{ matrix.os }}
+    # We force the Linux runner to use 20.04 for maximum GLIBC compatibility
+    runs-on: ${{ matrix.os == 'ubuntu-latest' && 'ubuntu-20.04' || matrix.os }}
     strategy:
       matrix:
         os: [ubuntu-latest, macos-latest, windows-latest]
