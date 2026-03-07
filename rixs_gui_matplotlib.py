@@ -29,7 +29,7 @@ try:
     from PyQt6 import QtWidgets, QtCore, QtGui
     from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, 
                                  QHBoxLayout, QGridLayout, QPushButton, QFileDialog, QTreeWidget, QTreeWidgetItem, 
-                                 QAbstractItemView, QLabel, QLineEdit, QSplitter, QComboBox, QSlider)
+                                 QAbstractItemView, QLabel, QLineEdit, QSplitter, QComboBox, QSlider, QMenu, QMessageBox)
     from PyQt6.QtCore import Qt
     matplotlib.use('QtAgg') 
     from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
@@ -41,7 +41,7 @@ except ImportError:
     from PyQt5 import QtWidgets, QtCore, QtGui
     from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, 
                                  QHBoxLayout, QGridLayout, QPushButton, QFileDialog, QTreeWidget, QTreeWidgetItem, 
-                                 QAbstractItemView, QLabel, QLineEdit, QSplitter, QComboBox, QSlider)
+                                 QAbstractItemView, QLabel, QLineEdit, QSplitter, QComboBox, QSlider, QMenu, QMessageBox)
     from PyQt5.QtCore import Qt
     matplotlib.use('Qt5Agg')
     from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
@@ -80,11 +80,16 @@ class RIXSGui(QMainWindow):
         self.load_btn.clicked.connect(self.load_files)
         sidebar.addWidget(self.load_btn)
 
-        sidebar.addWidget(QLabel("Data Hierarchy (Ctrl+Click to sum):"))
+        sidebar.addWidget(QLabel("Data Hierarchy (Right-Click for Header Info):"))
         self.scan_tree = QTreeWidget()
         self.scan_tree.setHeaderLabel("Files / Scans")
         self.scan_tree.setSelectionMode(EXT_SEL)
         self.scan_tree.itemSelectionChanged.connect(self.on_tree_selection) 
+        
+        # Enable Right-Click Context Menu
+        self.scan_tree.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.scan_tree.customContextMenuRequested.connect(self.show_context_menu)
+        
         sidebar.addWidget(self.scan_tree)
 
         color_group = QtWidgets.QGroupBox("Color Settings")
@@ -183,11 +188,38 @@ class RIXSGui(QMainWindow):
                 
                 for scan_name in data.keys():
                     if isinstance(data[scan_name], dict):
+                        # Extract sample_name for display
+                        sample_name = data[scan_name].get('sample_name', 'Unknown')
+                        
                         scan_item = QTreeWidgetItem(file_item)
-                        scan_item.setText(0, str(scan_name))
+                        # Modified display: "Scan_Key [Sample_Name]"
+                        scan_item.setText(0, f"{scan_name} [{sample_name}]")
                         scan_item.setData(0, USER_ROLE, (fname, scan_name))
             except Exception as e:
                 print(f"Error loading {f}: {e}")
+
+    def show_context_menu(self, position):
+        item = self.scan_tree.itemAt(position)
+        if not item: return
+
+        user_data = item.data(0, USER_ROLE)
+        if not user_data: return  # Ignore top-level file items if preferred
+
+        menu = QMenu()
+        info_action = menu.addAction("View Header Info")
+        action = menu.exec(self.scan_tree.mapToGlobal(position))
+
+        if action == info_action:
+            fname, sname = user_data
+            rixs = self.raw_data[fname][sname]
+            
+            s_id = rixs.get('sample_id', 'N/A')
+            s_name = rixs.get('sample_name', 'N/A')
+            # Extract scan numbers if they exist in the nested structure
+            scans = rixs.get('scan_numbers', sname)
+            
+            msg = f"<b>Sample ID:</b> {s_id}<br><b>Sample Name:</b> {s_name}<br><b>Scan(s):</b> {scans}"
+            QMessageBox.information(self, "Header Information", msg)
 
     def get_summed_data(self):
         selected_items = self.scan_tree.selectedItems()
