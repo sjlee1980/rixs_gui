@@ -186,15 +186,15 @@ class RIXSGui(QMainWindow):
                 file_item.setText(0, fname)
                 file_item.setExpanded(True)
                 
-                for scan_name in data.keys():
-                    if isinstance(data[scan_name], dict):
-                        # Extract sample_name for display
-                        sample_name = data[scan_name].get('sample_name', 'Unknown')
+                for scan_key in data.keys():
+                    # Feature 1: Filtering - Only show string keys (hide duplicate integers)
+                    if isinstance(scan_key, str) and isinstance(data[scan_key], dict):
+                        sample_name = data[scan_key].get('sample_name', 'Unknown')
                         
                         scan_item = QTreeWidgetItem(file_item)
-                        # Modified display: "Scan_Key [Sample_Name]"
-                        scan_item.setText(0, f"{scan_name} [{sample_name}]")
-                        scan_item.setData(0, USER_ROLE, (fname, scan_name))
+                        # Feature 2: Formatting - "Scan Key: Sample Name"
+                        scan_item.setText(0, f"{scan_key}: {sample_name}")
+                        scan_item.setData(0, USER_ROLE, (fname, scan_key))
             except Exception as e:
                 print(f"Error loading {f}: {e}")
 
@@ -203,7 +203,7 @@ class RIXSGui(QMainWindow):
         if not item: return
 
         user_data = item.data(0, USER_ROLE)
-        if not user_data: return  # Ignore top-level file items if preferred
+        if not user_data: return 
 
         menu = QMenu()
         info_action = menu.addAction("View Header Info")
@@ -215,7 +215,6 @@ class RIXSGui(QMainWindow):
             
             s_id = rixs.get('sample_id', 'N/A')
             s_name = rixs.get('sample_name', 'N/A')
-            # Extract scan numbers if they exist in the nested structure
             scans = rixs.get('scan_numbers', sname)
             
             msg = f"<b>Sample ID:</b> {s_id}<br><b>Sample Name:</b> {s_name}<br><b>Scan(s):</b> {scans}"
@@ -261,7 +260,6 @@ class RIXSGui(QMainWindow):
         x_min, x_max = np.min(d['x']), np.max(d['x'])
         y_min, y_max = np.min(d['y']), np.max(d['y'])
 
-        # Setup texts if empty
         if not self.roi_pfy_start.text(): self.roi_pfy_start.setText(f"{y_min:.2f}")
         if not self.roi_pfy_end.text(): self.roi_pfy_end.setText(f"{y_max:.2f}")
         if not self.roi_xes_start.text(): self.roi_xes_start.setText(f"{x_min:.2f}")
@@ -276,22 +274,17 @@ class RIXSGui(QMainWindow):
             y_s, y_e = y_min, y_max
             x_s, x_e = x_min, x_max
 
-        # 1. Clear ALL plots fully only on new selection
         self.ax_map.clear()
         self.ax_pfy.clear()
         self.ax_xes.clear()
         self.pfy_line = None
         self.xes_line = None
 
-        # 2. Draw map
         self.map_img = self.ax_map.pcolormesh(d['x'], d['y'], d['z'].T, shading='auto', 
                                               cmap=self.cmap_combo.currentText())
-        
-        # Hard-clamp the map limits immediately to prevent (0,0) stretching
         self.ax_map.set_xlim(x_min, x_max)
         self.ax_map.set_ylim(y_min, y_max)
         
-        # 3. Setup Interactive ROI Selector
         if self.selector: self.selector.set_active(False)
         self.selector = RectangleSelector(
             self.ax_map, self.on_select_roi,
@@ -299,26 +292,20 @@ class RIXSGui(QMainWindow):
         )
         self.selector.extents = (x_s, x_e, y_s, y_e)
         
-        # 4. Colorbar
         self.cax.clear()
         self.figure.colorbar(self.map_img, cax=self.cax)
         self.update_color_scale()
-        
-        # 5. Build integration lines
         self.update_integrations()
 
     def on_select_roi(self, eclick, erelease):
         x1, y1 = eclick.xdata, eclick.ydata
         x2, y2 = erelease.xdata, erelease.ydata
-        
         x_min, x_max = min(x1, x2), max(x1, x2)
         y_min, y_max = min(y1, y2), max(y1, y2)
-        
         self.roi_xes_start.setText(f"{x_min:.2f}")
         self.roi_xes_end.setText(f"{x_max:.2f}")
         self.roi_pfy_start.setText(f"{y_min:.2f}")
         self.roi_pfy_end.setText(f"{y_max:.2f}")
-        
         self.update_integrations()
 
     def update_integrations_from_text(self):
@@ -327,97 +314,58 @@ class RIXSGui(QMainWindow):
     def update_integrations(self):
         if not self.current_data: return
         d = self.current_data
-        
         try:
             y_s = float(self.roi_pfy_start.text())
             y_e = float(self.roi_pfy_end.text())
             x_s = float(self.roi_xes_start.text())
             x_e = float(self.roi_xes_end.text())
-        except ValueError:
-            return
+        except ValueError: return
 
         x_min, x_max = np.min(d['x']), np.max(d['x'])
         y_min, y_max = np.min(d['y']), np.max(d['y'])
-
-        # Clamp text fields strictly to data bounds
         x_s, x_e = max(x_min, x_s), min(x_max, x_e)
         y_s, y_e = max(y_min, y_s), min(y_max, y_e)
         
-        self.roi_xes_start.setText(f"{x_s:.2f}")
-        self.roi_xes_end.setText(f"{x_e:.2f}")
-        self.roi_pfy_start.setText(f"{y_s:.2f}")
-        self.roi_pfy_end.setText(f"{y_e:.2f}")
+        if self.selector: self.selector.extents = (x_s, x_e, y_s, y_e)
 
-        if self.selector:
-            self.selector.extents = (x_s, x_e, y_s, y_e)
-
-        # ---------------- PFY ----------------
-        idx_y_i = np.argmin(np.abs(d['y'] - y_s))
-        idx_y_f = np.argmin(np.abs(d['y'] - y_e))
+        idx_y_i = np.argmin(np.abs(d['y'] - y_s)); idx_y_f = np.argmin(np.abs(d['y'] - y_e))
         pfy_curve = np.sum(d['z'][:, min(idx_y_i, idx_y_f):max(idx_y_i, idx_y_f)], axis=1)
-        
         if self.pfy_line is None or self.pfy_line not in self.ax_pfy.lines:
             self.pfy_line, = self.ax_pfy.plot(d['x'], pfy_curve, color='lime')
-            self.ax_pfy.set_ylabel("PFY")
-            plt.setp(self.ax_pfy.get_xticklabels(), visible=False)
         else:
-            self.pfy_line.set_ydata(pfy_curve)
-            self.pfy_line.set_xdata(d['x'])
-            self.ax_pfy.relim()
-            self.ax_pfy.autoscale_view(scalex=False, scaley=True)
-
-        # FIX: Safe removal of patches for newer Matplotlib ArtistList
-        for patch in list(self.ax_pfy.patches): patch.remove()
+            self.pfy_line.set_ydata(pfy_curve); self.ax_pfy.relim(); self.ax_pfy.autoscale_view(scalex=False, scaley=True)
+        for p in list(self.ax_pfy.patches): p.remove()
         self.ax_pfy.axvspan(x_s, x_e, color='cyan', alpha=0.1) 
 
-        # ---------------- XES ----------------
-        idx_x_i = np.argmin(np.abs(d['x'] - x_s))
-        idx_x_f = np.argmin(np.abs(d['x'] - x_e))
+        idx_x_i = np.argmin(np.abs(d['x'] - x_s)); idx_x_f = np.argmin(np.abs(d['x'] - x_e))
         xes_curve = np.sum(d['z'][min(idx_x_i, idx_x_f):max(idx_x_i, idx_x_f), :], axis=0)
-        
         if self.xes_line is None or self.xes_line not in self.ax_xes.lines:
             self.xes_line, = self.ax_xes.plot(xes_curve, d['y'], color='cyan')
-            self.ax_xes.set_xlabel("XES")
-            plt.setp(self.ax_xes.get_yticklabels(), visible=False)
         else:
-            self.xes_line.set_xdata(xes_curve)
-            self.xes_line.set_ydata(d['y'])
-            self.ax_xes.relim()
-            self.ax_xes.autoscale_view(scalex=True, scaley=False)
-
-        # FIX: Safe removal of patches for newer Matplotlib ArtistList
-        for patch in list(self.ax_xes.patches): patch.remove()
+            self.xes_line.set_xdata(xes_curve); self.ax_xes.relim(); self.ax_xes.autoscale_view(scalex=True, scaley=False)
+        for p in list(self.ax_xes.patches): p.remove()
         self.ax_xes.axhspan(y_s, y_e, color='lime', alpha=0.1)
 
-        # ---------------- MAP LINES ----------------
-        # FIX: Safe removal of lines for newer Matplotlib ArtistList
-        for line in list(self.ax_map.lines): line.remove()
+        for l in list(self.ax_map.lines): l.remove()
         self.ax_map.axhline(y_s, color='lime', linestyle='--', linewidth=1)
         self.ax_map.axhline(y_e, color='lime', linestyle='--', linewidth=1)
         self.ax_map.axvline(x_s, color='cyan', linestyle='--', linewidth=1)
         self.ax_map.axvline(x_e, color='cyan', linestyle='--', linewidth=1)
-
         self.canvas.draw()
 
     def update_color_scale(self):
         if self.map_img is None: return
         raw_data = self.map_img.get_array()
         d_min, d_max = np.min(raw_data), np.max(raw_data)
-        s_min = self.slider_min.value() / 100.0
-        s_max = self.slider_max.value() / 100.0
-        new_vmin = d_min + (d_max - d_min) * s_min
-        new_vmax = d_min + (d_max - d_min) * s_max
-        if new_vmin >= new_vmax: new_vmax = new_vmin + 1e-6
-        self.map_img.set_clim(new_vmin, new_vmax)
-        self.canvas.draw()
+        s_min, s_max = self.slider_min.value() / 100.0, self.slider_max.value() / 100.0
+        vmin, vmax = d_min + (d_max - d_min) * s_min, d_min + (d_max - d_min) * s_max
+        if vmin >= vmax: vmax = vmin + 1e-6
+        self.map_img.set_clim(vmin, vmax); self.canvas.draw()
 
     def update_color_map(self, cmap_name):
-        if self.map_img:
-            self.map_img.set_cmap(cmap_name)
-            self.canvas.draw()
+        if self.map_img: self.map_img.set_cmap(cmap_name); self.canvas.draw()
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)
-    window = RIXSGui()
-    window.show()
+    window = RIXSGui(); window.show()
     getattr(app, EXEC_FUNC)()
