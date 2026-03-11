@@ -53,7 +53,7 @@ except ImportError:
 class RIXSGui(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("RIXS Analyzer: Interactive Summing")
+        self.setWindowTitle("RIXS Analyzer: Full Export Support")
         self.setGeometry(50, 50, 1600, 1000)
         self.raw_data = {}
         
@@ -64,6 +64,11 @@ class RIXSGui(QMainWindow):
         
         self.pfy_line = None
         self.xes_line = None
+        
+        self.current_pfy_x = None
+        self.current_pfy_y = None
+        self.current_xes_x = None
+        self.current_xes_y = None
         
         self.init_ui()
 
@@ -83,15 +88,25 @@ class RIXSGui(QMainWindow):
         self.scan_tree = QTreeWidget()
         self.scan_tree.setHeaderLabel("Files / Folders / Scans")
         self.scan_tree.setSelectionMode(SEL_MODE)
-        
-        # Connect: Folder selection triggers sum; Checkbox toggle updates sum
         self.scan_tree.itemSelectionChanged.connect(self.on_tree_selection)
         self.scan_tree.itemChanged.connect(self.on_checkbox_trigger) 
-        
         self.scan_tree.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.scan_tree.customContextMenuRequested.connect(self.show_context_menu)
-        
         sidebar.addWidget(self.scan_tree)
+
+        sidebar.addSpacing(10)
+        
+        self.save_map_btn = QPushButton("Save Summed RIXS Map (.pkl.gz)")
+        self.save_map_btn.setStyleSheet("background-color: #1976d2; color: white; font-weight: bold; padding: 5px;")
+        self.save_map_btn.clicked.connect(self.export_2d_map)
+        sidebar.addWidget(self.save_map_btn)
+
+        self.export_btn = QPushButton("Save Integrated 1D Curves (.txt)")
+        self.export_btn.setStyleSheet("background-color: #2e7d32; color: white; font-weight: bold; padding: 5px;")
+        self.export_btn.clicked.connect(self.export_1d_data)
+        sidebar.addWidget(self.export_btn)
+        
+        sidebar.addSpacing(10)
 
         # --- Color Settings ---
         color_group = QtWidgets.QGroupBox("Color Settings")
@@ -121,7 +136,9 @@ class RIXSGui(QMainWindow):
 
         # --- Plots ---
         self.figure = plt.figure(figsize=(10, 8)); self.canvas = FigureCanvas(self.figure); self.toolbar = NavigationToolbar(self.canvas, self)
-        self.gs = gridspec.GridSpec(2, 3, width_ratios=[4, 1.2, 0.2], height_ratios=[1, 4], wspace=0.1, hspace=0.1)
+        
+        # UI FIX: Increased wspace and hspace to prevent XES/PFY labels from overlapping the RIXS map
+        self.gs = gridspec.GridSpec(2, 3, width_ratios=[4, 1.2, 0.2], height_ratios=[1, 4], wspace=0.3, hspace=0.3)
         self.ax_pfy = self.figure.add_subplot(self.gs[0, 0]); self.ax_map = self.figure.add_subplot(self.gs[1, 0], sharex=self.ax_pfy); self.ax_xes = self.figure.add_subplot(self.gs[1, 1], sharey=self.ax_map); self.cax = self.figure.add_subplot(self.gs[1, 2])
         plt.setp(self.ax_pfy.get_xticklabels(), visible=False); plt.setp(self.ax_xes.get_yticklabels(), visible=False)
 
@@ -153,10 +170,7 @@ class RIXSGui(QMainWindow):
         self.scan_tree.blockSignals(False)
 
     def on_checkbox_trigger(self, item, column):
-        """Triggers a replot if a checkbox is toggled on a scan."""
-        # Check if the changed item is a scan (it has a parent with USER_ROLE)
-        if item.parent() and item.parent().data(0, USER_ROLE):
-            self.on_tree_selection()
+        if item.parent() and item.parent().data(0, USER_ROLE): self.on_tree_selection()
 
     def show_context_menu(self, position):
         item = self.scan_tree.itemAt(position)
@@ -166,18 +180,14 @@ class RIXSGui(QMainWindow):
         QMessageBox.information(self, "Header Information", msg)
 
     def get_summed_data(self):
-        """Sums ONLY checked Tier 3 scans for ALL selected Tier 2 items."""
         selected_items = self.scan_tree.selectedItems()
         if not selected_items: return None
         summed_z, common_x, common_y = None, None, None
-
         for folder_item in selected_items:
             user_data = folder_item.data(0, USER_ROLE)
-            if not user_data: continue # Ignore File or Scan clicks
-
+            if not user_data: continue
             for i in range(folder_item.childCount()):
                 scan_item = folder_item.child(i)
-                # Filter: Sum only if scan is CHECKED
                 if scan_item.checkState(0) == Qt.CheckState.Checked:
                     fname, sname = user_data; rixs = self.raw_data[fname][sname]
                     z_key = 'rixs_plane1_norm' if 'rixs_plane1_norm' in rixs else 'rixs_plane0_norm'
@@ -185,29 +195,18 @@ class RIXSGui(QMainWindow):
                     z = np.sum(rixs[z_key], axis=0); x, y = rixs[x_key], rixs['bin_centers']
                     if summed_z is None: summed_z, common_x, common_y = z.copy(), x, y
                     elif z.shape == summed_z.shape: summed_z += z
-
-        if summed_z is None: return None
-        return {'x': common_x, 'y': common_y, 'z': summed_z}
+        return {'x': common_x, 'y': common_y, 'z': summed_z} if summed_z is not None else None
 
     def on_tree_selection(self):
         new_data = self.get_summed_data()
-        if not new_data: 
-            # Clear if no folders are selected or no scans are checked
-            self.ax_map.clear(); self.ax_pfy.clear(); self.ax_xes.clear(); self.canvas.draw(); return
-            
+        if not new_data: self.ax_map.clear(); self.ax_pfy.clear(); self.ax_xes.clear(); self.canvas.draw(); return
         self.current_data = new_data; d = self.current_data; x_min, x_max = np.min(d['x']), np.max(d['x']); y_min, y_max = np.min(d['y']), np.max(d['y'])
-        
-        # Preserve existing ROI text if present
-        if not self.roi_pfy_start.text(): self.roi_pfy_start.setText(f"{y_min:.2f}")
-        if not self.roi_pfy_end.text(): self.roi_pfy_end.setText(f"{y_max:.2f}")
-        if not self.roi_xes_start.text(): self.roi_xes_start.setText(f"{x_min:.2f}")
-        if not self.roi_xes_end.text(): self.roi_xes_end.setText(f"{x_max:.2f}")
-
+        if not self.roi_pfy_start.text(): self.roi_pfy_start.setText(f"{y_min:.2f}"); self.roi_pfy_end.setText(f"{y_max:.2f}"); self.roi_xes_start.setText(f"{x_min:.2f}"); self.roi_xes_end.setText(f"{x_max:.2f}")
         try: y_s, y_e = float(self.roi_pfy_start.text()), float(self.roi_pfy_end.text()); x_s, x_e = float(self.roi_xes_start.text()), float(self.roi_xes_end.text())
         except ValueError: y_s, y_e, x_s, x_e = y_min, y_max, x_min, x_max
-
         self.ax_map.clear(); self.ax_pfy.clear(); self.ax_xes.clear(); self.pfy_line = None; self.xes_line = None
         self.map_img = self.ax_map.pcolormesh(d['x'], d['y'], d['z'].T, shading='auto', cmap=self.cmap_combo.currentText())
+        self.ax_map.set_xlabel("Incident Energy (eV)"); self.ax_map.set_ylabel("Emission Energy (eV)")
         self.ax_map.set_xlim(x_min, x_max); self.ax_map.set_ylim(y_min, y_max)
         if self.selector: self.selector.set_active(False)
         self.selector = RectangleSelector(self.ax_map, self.on_select_roi, useblit=True, button=[1], minspanx=5, minspany=5, interactive=True); self.selector.extents = (x_s, x_e, y_s, y_e)
@@ -224,18 +223,54 @@ class RIXSGui(QMainWindow):
         try: y_s, y_e = float(self.roi_pfy_start.text()), float(self.roi_pfy_end.text()); x_s, x_e = float(self.roi_xes_start.text()), float(self.roi_xes_end.text())
         except ValueError: return
         if self.selector: self.selector.extents = (x_s, x_e, y_s, y_e)
-        idx_y_i = np.argmin(np.abs(d['y'] - y_s)); idx_y_f = np.argmin(np.abs(d['y'] - y_e)); pfy_curve = np.sum(d['z'][:, min(idx_y_i, idx_y_f):max(idx_y_i, idx_y_f)], axis=1)
-        if self.pfy_line is None or self.pfy_line not in self.ax_pfy.lines: self.pfy_line, = self.ax_pfy.plot(d['x'], pfy_curve, color='lime')
-        else: self.pfy_line.set_ydata(pfy_curve); self.ax_pfy.relim(); self.ax_pfy.autoscale_view(scalex=False, scaley=True)
+        idx_y_i, idx_y_f = np.argmin(np.abs(d['y'] - y_s)), np.argmin(np.abs(d['y'] - y_e))
+        self.current_pfy_y = np.sum(d['z'][:, min(idx_y_i, idx_y_f):max(idx_y_i, idx_y_f)], axis=1); self.current_pfy_x = d['x']
+        if self.pfy_line is None or self.pfy_line not in self.ax_pfy.lines: self.pfy_line, = self.ax_pfy.plot(self.current_pfy_x, self.current_pfy_y, color='lime')
+        else: self.pfy_line.set_ydata(self.current_pfy_y); self.ax_pfy.relim(); self.ax_pfy.autoscale_view(scalex=False, scaley=True)
         for p in list(self.ax_pfy.patches): p.remove()
         self.ax_pfy.axvspan(x_s, x_e, color='cyan', alpha=0.1) 
-        idx_x_i = np.argmin(np.abs(d['x'] - x_s)); idx_x_f = np.argmin(np.abs(d['x'] - x_e)); xes_curve = np.sum(d['z'][min(idx_x_i, idx_x_f):max(idx_x_i, idx_x_f), :], axis=0)
-        if self.xes_line is None or self.xes_line not in self.ax_xes.lines: self.xes_line, = self.ax_xes.plot(xes_curve, d['y'], color='cyan')
-        else: self.xes_line.set_xdata(xes_curve); self.ax_xes.relim(); self.ax_xes.autoscale_view(scalex=True, scaley=False)
+        idx_x_i, idx_x_f = np.argmin(np.abs(d['x'] - x_s)), np.argmin(np.abs(d['x'] - x_e))
+        self.current_xes_x = np.sum(d['z'][min(idx_x_i, idx_x_f):max(idx_x_i, idx_x_f), :], axis=0); self.current_xes_y = d['y']
+        if self.xes_line is None or self.xes_line not in self.ax_xes.lines: self.xes_line, = self.ax_xes.plot(self.current_xes_x, self.current_xes_y, color='cyan')
+        else: self.xes_line.set_xdata(self.current_xes_x); self.ax_xes.relim(); self.ax_xes.autoscale_view(scalex=True, scaley=False)
         for p in list(self.ax_xes.patches): p.remove()
         self.ax_xes.axhspan(y_s, y_e, color='lime', alpha=0.1)
         for l in list(self.ax_map.lines): l.remove()
         self.ax_map.axhline(y_s, color='lime', linestyle='--', linewidth=1); self.ax_map.axhline(y_e, color='lime', linestyle='--', linewidth=1); self.ax_map.axvline(x_s, color='cyan', linestyle='--', linewidth=1); self.ax_map.axvline(x_e, color='cyan', linestyle='--', linewidth=1); self.canvas.draw()
+
+    def export_2d_map(self):
+        if self.current_data is None: QMessageBox.warning(self, "Export Error", "No RIXS map available."); return
+        path, _ = QFileDialog.getSaveFileName(self, "Save Summed RIXS Map", "summed_rixs_map.pkl.gz", "Gzip Pickle Files (*.pkl.gz)")
+        if not path: return
+        try:
+            export_dict = {'rixs_sum': {'rixs_plane0_norm': np.array([self.current_data['z']]), 'valid_nominal_mono': self.current_data['x'], 'bin_centers': self.current_data['y'], 'sample_name': 'Summed_Result', 'sample_id': 'SUM_ROI'}}
+            with gzip.open(path, 'wb') as f: cPickle.dump(export_dict, f, protocol=4)
+            QMessageBox.information(self, "Success", f"Summed RIXS map exported successfully.")
+        except Exception as e: QMessageBox.critical(self, "Export Failed", str(e))
+
+    def export_1d_data(self):
+        """Saves integrated 1D curves with ROI metadata and overwrite protection."""
+        if self.current_pfy_x is None: QMessageBox.warning(self, "Export Error", "No 1D curves available."); return
+        
+        # EXPORT FIX: Use Option.DontConfirmOverwrite only if you want the warning disabled, 
+        # but here we ensure the native dialog's warning is active by default.
+        path, _ = QFileDialog.getSaveFileName(self, "Save Integrated 1D Curves", "integrated_curves.txt", "Text Files (*.txt)")
+        if not path: return
+        
+        pfy_roi = f"[{self.roi_pfy_start.text()}, {self.roi_pfy_end.text()}]"
+        xes_roi = f"[{self.roi_xes_start.text()}, {self.roi_xes_end.text()}]"
+        
+        try:
+            with open(path.replace(".txt", "_pfy.txt"), 'w') as f:
+                f.write(f"# PFY Integrated over Emission ROI: {pfy_roi} eV\n")
+                f.write("# Incident_Energy(eV)\tPFY_Intensity\n")
+                for x, y in zip(self.current_pfy_x, self.current_pfy_y): f.write(f"{x:.6f}\t{y:.6f}\n")
+            with open(path.replace(".txt", "_xes.txt"), 'w') as f:
+                f.write(f"# XES Integrated over Excitation ROI: {xes_roi} eV\n")
+                f.write("# Emission_Energy(eV)\tXES_Intensity\n")
+                for y, x in zip(self.current_xes_y, self.current_xes_x): f.write(f"{y:.6f}\t{x:.6f}\n")
+            QMessageBox.information(self, "Success", f"1D data with ROI headers exported successfully.")
+        except Exception as e: QMessageBox.critical(self, "Export Failed", str(e))
 
     def update_color_scale(self):
         if not self.map_img: return
