@@ -53,7 +53,7 @@ except ImportError:
 class RIXSGui(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("RIXS Analyzer: Perfected Math & Overlay")
+        self.setWindowTitle("RIXS Analyzer: Perfected ROI & Overlay")
         self.setGeometry(50, 50, 1600, 1000)
         self.raw_data = {}
         
@@ -67,6 +67,9 @@ class RIXSGui(QMainWindow):
         self.held_xes = [] 
         self.color_cycle = ['lime', 'orange', 'magenta', 'cyan', 'yellow', 'red', 'white']
         self.current_color_idx = 0
+        
+        # Track lines to prevent deleting ROI handles
+        self.roi_crosshairs = []
         
         self.init_ui()
 
@@ -92,9 +95,14 @@ class RIXSGui(QMainWindow):
 
         sidebar.addSpacing(10)
 
+        # --- Checkboxes for Scaling & Overlay ---
         self.count_toggle = QCheckBox("Show Flux-Corrected Counts")
         self.count_toggle.clicked.connect(self.on_toggle_counts)
         sidebar.addWidget(self.count_toggle)
+
+        self.norm_max_toggle = QCheckBox("Normalize to Max (Peak=1)")
+        self.norm_max_toggle.clicked.connect(self.on_tree_selection)
+        sidebar.addWidget(self.norm_max_toggle)
 
         self.hold_toggle = QCheckBox("Hold Curves (Overlay)")
         self.hold_toggle.toggled.connect(self.manage_overlay_state)
@@ -111,13 +119,14 @@ class RIXSGui(QMainWindow):
         self.save_map_btn.clicked.connect(self.export_2d_map)
         sidebar.addWidget(self.save_map_btn)
 
-        self.export_btn = QPushButton("Save Integrated 1D Curves (.txt)")
+        self.export_btn = QPushButton("Save Active 1D Curves (.txt)")
         self.export_btn.setStyleSheet("background-color: #2e7d32; color: white; font-weight: bold; padding: 5px;")
         self.export_btn.clicked.connect(self.export_1d_data)
         sidebar.addWidget(self.export_btn)
         
         sidebar.addSpacing(10)
 
+        # --- Color Settings ---
         color_group = QtWidgets.QGroupBox("Color Settings")
         color_layout = QGridLayout()
         color_layout.addWidget(QLabel("CMap:"), 0, 0)
@@ -132,6 +141,7 @@ class RIXSGui(QMainWindow):
         self.slider_max.valueChanged.connect(self.update_color_scale); color_layout.addWidget(self.slider_max, 2, 1)
         color_group.setLayout(color_layout); sidebar.addWidget(color_group)
 
+        # --- ROI ---
         roi_pfy_group = QtWidgets.QGroupBox("PFY ROI (Emission Y-Axis)"); roi_pfy_layout = QGridLayout()
         self.roi_pfy_start = QLineEdit(); self.roi_pfy_start.editingFinished.connect(self.update_integrations_from_text); roi_pfy_layout.addWidget(QLabel("Start:"), 0, 0); roi_pfy_layout.addWidget(self.roi_pfy_start, 0, 1)
         self.roi_pfy_end = QLineEdit(); self.roi_pfy_end.editingFinished.connect(self.update_integrations_from_text); roi_pfy_layout.addWidget(QLabel("End:"), 1, 0); roi_pfy_layout.addWidget(self.roi_pfy_end, 1, 1)
@@ -204,7 +214,6 @@ class RIXSGui(QMainWindow):
         ix_i, ix_f = self.get_excitation_indices()
         d = self.current_data
 
-        # MATH FIX: Strictly multiply the raw PFY shape by a single scalar constant
         raw_pfy = np.sum(d['z_norm'][:, min(iy_i, iy_f):max(iy_i, iy_f)], axis=1)
         if self.count_toggle.isChecked():
             pfy0_flux = np.sum(d['z_flux'][0, min(iy_i, iy_f):max(iy_i, iy_f)])
@@ -215,11 +224,14 @@ class RIXSGui(QMainWindow):
         source_z = d['z_flux'] if self.count_toggle.isChecked() else d['z_norm']
         x_xes = np.sum(source_z[min(ix_i, ix_f):max(ix_i, ix_f), :], axis=0)
 
-        if not self.held_pfy or not np.array_equal(self.held_pfy[-1][1], y_pfy):
-            color = self.color_cycle[self.current_color_idx % len(self.color_cycle)]
-            self.held_pfy.append((d['x'], y_pfy, color, label))
-            self.held_xes.append((x_xes, d['y'], color, label))
-            self.current_color_idx += 1
+        # BUG FIX 1: Overwrite existing entry with the same label to prevent duplicates
+        self.held_pfy = [item for item in self.held_pfy if item[3] != label]
+        self.held_xes = [item for item in self.held_xes if item[3] != label]
+
+        color = self.color_cycle[self.current_color_idx % len(self.color_cycle)]
+        self.held_pfy.append((d['x'], y_pfy, color, label))
+        self.held_xes.append((x_xes, d['y'], color, label))
+        self.current_color_idx += 1
 
     def clear_overlay(self):
         self.held_pfy, self.held_xes, self.current_color_idx = [], [], 0
@@ -265,14 +277,19 @@ class RIXSGui(QMainWindow):
         try: ys, ye = float(self.roi_pfy_start.text()), float(self.roi_pfy_end.text()); xs, xe = float(self.roi_xes_start.text()), float(self.roi_xes_end.text())
         except ValueError: ys, ye, xs, xe = y_min, y_max, x_min, x_max
 
+        # Disconnect old selector properly before clearing axes
+        if self.selector:
+            self.selector.set_active(False)
+            self.selector = None
+
         self.ax_map.clear()
         disp_z = d['z_flux'] if self.count_toggle.isChecked() else d['z_norm']
         self.map_img = self.ax_map.pcolormesh(d['x'], d['y'], disp_z.T, shading='auto', cmap=self.cmap_combo.currentText())
         self.ax_map.set_xlabel("Incident Energy (eV)"); self.ax_map.set_ylabel("Emission Energy (eV)")
         self.ax_map.set_xlim(x_min, x_max); self.ax_map.set_ylim(y_min, y_max)
         
-        if self.selector: self.selector.set_active(False)
-        self.selector = RectangleSelector(self.ax_map, self.on_select_roi, useblit=True, button=[1], minspanx=5, minspany=5, interactive=True); self.selector.extents = (xs, xe, ys, ye)
+        self.selector = RectangleSelector(self.ax_map, self.on_select_roi, useblit=True, button=[1], interactive=True)
+        self.selector.extents = (xs, xe, ys, ye)
         
         if self.hold_toggle.isChecked(): self.capture_current_to_overlay()
         
@@ -292,6 +309,12 @@ class RIXSGui(QMainWindow):
 
     def on_select_roi(self, eclick, erelease):
         x1, x2 = sorted([eclick.xdata, erelease.xdata]); y1, y2 = sorted([eclick.ydata, erelease.ydata])
+        
+        # BUG FIX 2: Safeguard against double-clicks or zero-width boxes which break the selector
+        if abs(x2 - x1) < 1e-4 or abs(y2 - y1) < 1e-4:
+            self.update_integrations() 
+            return
+            
         self.roi_xes_start.setText(f"{x1:.2f}"); self.roi_xes_end.setText(f"{x2:.2f}"); self.roi_pfy_start.setText(f"{y1:.2f}"); self.roi_pfy_end.setText(f"{y2:.2f}")
         self.update_integrations()
 
@@ -302,9 +325,10 @@ class RIXSGui(QMainWindow):
         d = self.current_data
         iy_i, iy_f = self.get_integration_indices()
         ix_i, ix_f = self.get_excitation_indices()
-        unit = "Flux-Corrected Counts" if self.count_toggle.isChecked() else "Normalized Intensity"
         
-        # MATH FIX: Constant scalar logic for PFY
+        unit = "Peak Normalized" if self.norm_max_toggle.isChecked() else ("Flux-Corrected Counts" if self.count_toggle.isChecked() else "Normalized Intensity")
+        
+        # Current PFY Calculations
         raw_pfy = np.sum(d['z_norm'][:, min(iy_i, iy_f):max(iy_i, iy_f)], axis=1)
         if self.count_toggle.isChecked():
             pfy0_flux = np.sum(d['z_flux'][0, min(iy_i, iy_f):max(iy_i, iy_f)])
@@ -312,22 +336,33 @@ class RIXSGui(QMainWindow):
         else:
             cur_pfy_y = raw_pfy
 
+        # Current XES Calculations
         source_z = d['z_flux'] if self.count_toggle.isChecked() else d['z_norm']
         cur_xes_x = np.sum(source_z[min(ix_i, ix_f):max(ix_i, ix_f), :], axis=0)
 
         self.ax_pfy.clear(); self.ax_xes.clear(); self.ax_leg.clear(); self.ax_leg.axis('off')
         active_label = self.scan_tree.selectedItems()[0].text(0) if self.scan_tree.selectedItems() else "Active"
 
-        # Suppress duplicate legend items for active folder
+        # Plot Held Curves
         for px, py, col, lbl in self.held_pfy:
-            if lbl != active_label: self.ax_pfy.plot(px, py, color=col, alpha=0.6, linestyle='--', label=f"{lbl}")
+            if lbl != active_label: 
+                plot_y = py / np.max(py) if (self.norm_max_toggle.isChecked() and np.max(py) != 0) else py
+                self.ax_pfy.plot(px, plot_y, color=col, alpha=0.6, linestyle='--', label=f"{lbl}")
+                
         for xx, xy, col, lbl in self.held_xes:
-            if lbl != active_label: self.ax_xes.plot(xx, xy, color=col, alpha=0.6, linestyle='--')
+            if lbl != active_label: 
+                plot_x = xx / np.max(xx) if (self.norm_max_toggle.isChecked() and np.max(xx) != 0) else xx
+                self.ax_xes.plot(plot_x, xy, color=col, alpha=0.6, linestyle='--')
 
+        # Plot Active Curve
         act_col = self.color_cycle[self.current_color_idx % len(self.color_cycle)]
-        self.ax_pfy.plot(d['x'], cur_pfy_y, color=act_col, linewidth=2, label=active_label)
-        self.ax_xes.plot(cur_xes_x, d['y'], color=act_col, linewidth=2)
+        plot_cur_pfy_y = cur_pfy_y / np.max(cur_pfy_y) if (self.norm_max_toggle.isChecked() and np.max(cur_pfy_y) != 0) else cur_pfy_y
+        plot_cur_xes_x = cur_xes_x / np.max(cur_xes_x) if (self.norm_max_toggle.isChecked() and np.max(cur_xes_x) != 0) else cur_xes_x
+        
+        self.ax_pfy.plot(d['x'], plot_cur_pfy_y, color=act_col, linewidth=2, label=active_label)
+        self.ax_xes.plot(plot_cur_xes_x, d['y'], color=act_col, linewidth=2)
 
+        # Legend Handling
         if self.hold_toggle.isChecked() or self.held_pfy:
             h, l = self.ax_pfy.get_legend_handles_labels()
             self.ax_leg.legend(h, l, loc='center', fontsize='small', frameon=True)
@@ -339,10 +374,24 @@ class RIXSGui(QMainWindow):
         try: xs, xe = float(self.roi_xes_start.text()), float(self.roi_xes_end.text()); ys, ye = float(self.roi_pfy_start.text()), float(self.roi_pfy_end.text())
         except: xs, xe, ys, ye = np.min(d['x']), np.max(d['x']), np.min(d['y']), np.max(d['y'])
         
+        # Spans
         self.ax_pfy.axvspan(xs, xe, color='cyan', alpha=0.1); self.ax_xes.axhspan(ys, ye, color='lime', alpha=0.1)
-        for line in list(self.ax_map.lines): line.remove()
-        self.ax_map.axhline(ys, color='lime', linestyle='--', linewidth=1); self.ax_map.axhline(ye, color='lime', linestyle='--', linewidth=1)
-        self.ax_map.axvline(xs, color='cyan', linestyle='--', linewidth=1); self.ax_map.axvline(xe, color='cyan', linestyle='--', linewidth=1)
+        
+        # BUG FIX 2: Safely remove old crosshairs without nuking the RectangleSelector handles
+        for line in self.roi_crosshairs:
+            try: line.remove()
+            except: pass
+        
+        self.roi_crosshairs = [
+            self.ax_map.axhline(ys, color='lime', linestyle='--', linewidth=1),
+            self.ax_map.axhline(ye, color='lime', linestyle='--', linewidth=1),
+            self.ax_map.axvline(xs, color='cyan', linestyle='--', linewidth=1),
+            self.ax_map.axvline(xe, color='cyan', linestyle='--', linewidth=1)
+        ]
+        
+        # Snap the interactive selector back to the inputs to ensure UI remains synced
+        if self.selector: self.selector.extents = (xs, xe, ys, ye)
+        
         self.canvas.draw()
 
     def export_2d_map(self):
@@ -359,20 +408,38 @@ class RIXSGui(QMainWindow):
         path, _ = QFileDialog.getSaveFileName(self, "Save Integrated Curves", "curves.txt", "Text Files (*.txt)")
         if not path: return
         try:
-            with open(path.replace(".txt", "_pfy.txt"), 'w') as f:
-                f.write(f"# PFY Data\n# Energy(eV)\tIntensity\n")
-                d = self.current_data; iy_i, iy_f = self.get_integration_indices()
-                raw_pfy = np.sum(d['z_norm'][:, min(iy_i, iy_f):max(iy_i, iy_f)], axis=1)
+            d = self.current_data
+            
+            # --- Export PFY ---
+            iy_i, iy_f = self.get_integration_indices()
+            raw_pfy = np.sum(d['z_norm'][:, min(iy_i, iy_f):max(iy_i, iy_f)], axis=1)
+            
+            if self.count_toggle.isChecked():
+                pfy0_flux = np.sum(d['z_flux'][0, min(iy_i, iy_f):max(iy_i, iy_f)])
+                y_pfy = raw_pfy * (pfy0_flux / raw_pfy[0]) if raw_pfy[0] != 0 else raw_pfy
+            else:
+                y_pfy = raw_pfy
                 
-                # Apply same scalar math on export
-                if self.count_toggle.isChecked():
-                    pfy0_flux = np.sum(d['z_flux'][0, min(iy_i, iy_f):max(iy_i, iy_f)])
-                    y_pfy = raw_pfy * (pfy0_flux / raw_pfy[0]) if raw_pfy[0] != 0 else raw_pfy
-                else:
-                    y_pfy = raw_pfy
+            if self.norm_max_toggle.isChecked() and np.max(y_pfy) != 0:
+                y_pfy = y_pfy / np.max(y_pfy)
 
+            with open(path.replace(".txt", "_pfy.txt"), 'w') as f:
+                f.write(f"# PFY [ROI {self.roi_pfy_start.text()}-{self.roi_pfy_end.text()}]\n# Energy(eV)\tIntensity\n")
                 for x, y in zip(d['x'], y_pfy): f.write(f"{x:.6f}\t{y:.6f}\n")
-            QMessageBox.information(self, "Success", "PFY data exported.")
+
+            # --- Export XES ---
+            ix_i, ix_f = self.get_excitation_indices()
+            source_z = d['z_flux'] if self.count_toggle.isChecked() else d['z_norm']
+            x_xes = np.sum(source_z[min(ix_i, ix_f):max(ix_i, ix_f), :], axis=0)
+
+            if self.norm_max_toggle.isChecked() and np.max(x_xes) != 0:
+                x_xes = x_xes / np.max(x_xes)
+                
+            with open(path.replace(".txt", "_xes.txt"), 'w') as f:
+                f.write(f"# XES [ROI {self.roi_xes_start.text()}-{self.roi_xes_end.text()}]\n# Emission_Energy(eV)\tIntensity\n")
+                for y, x in zip(d['y'], x_xes): f.write(f"{y:.6f}\t{x:.6f}\n")
+                
+            QMessageBox.information(self, "Success", "1D active curves exported successfully.")
         except Exception as e: QMessageBox.critical(self, "Export Failed", str(e))
 
     def update_color_scale(self):
