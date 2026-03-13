@@ -53,7 +53,7 @@ except ImportError:
 class RIXSGui(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("RIXS Analyzer: Stable Flux-Corrected Counts")
+        self.setWindowTitle("RIXS Analyzer: Clean Overlay & Custom Legend")
         self.setGeometry(50, 50, 1600, 1000)
         self.raw_data = {}
         
@@ -62,13 +62,11 @@ class RIXSGui(QMainWindow):
         self.selector = None 
         self.cax = None      
         
-        self.pfy_line = None
-        self.xes_line = None
-        
-        self.current_pfy_x = None
-        self.current_pfy_y = None
-        self.current_xes_x = None
-        self.current_xes_y = None
+        # Overlay and Legend state
+        self.held_pfy = [] # List of (x, y, color, label)
+        self.held_xes = [] 
+        self.color_cycle = ['lime', 'orange', 'magenta', 'cyan', 'yellow', 'red', 'white']
+        self.current_color_idx = 0
         
         self.init_ui()
 
@@ -94,10 +92,20 @@ class RIXSGui(QMainWindow):
 
         sidebar.addSpacing(10)
 
-        # Checkbox for Flux-Corrected Counts
+        # Controls
         self.count_toggle = QCheckBox("Show Flux-Corrected Counts")
-        self.count_toggle.clicked.connect(self.on_tree_selection)
+        self.count_toggle.clicked.connect(self.on_toggle_counts)
         sidebar.addWidget(self.count_toggle)
+
+        self.hold_toggle = QCheckBox("Hold Curves (Overlay)")
+        self.hold_toggle.toggled.connect(self.manage_overlay_state)
+        sidebar.addWidget(self.hold_toggle)
+
+        self.clear_overlay_btn = QPushButton("Clear Overlay")
+        self.clear_overlay_btn.clicked.connect(self.clear_overlay)
+        sidebar.addWidget(self.clear_overlay_btn)
+
+        sidebar.addSpacing(10)
         
         self.save_map_btn = QPushButton("Save Summed RIXS Map (.pkl.gz)")
         self.save_map_btn.setStyleSheet("background-color: #1976d2; color: white; font-weight: bold; padding: 5px;")
@@ -111,7 +119,7 @@ class RIXSGui(QMainWindow):
         
         sidebar.addSpacing(10)
 
-        # --- Color Settings ---
+        # Color Settings
         color_group = QtWidgets.QGroupBox("Color Settings")
         color_layout = QGridLayout()
         color_layout.addWidget(QLabel("CMap:"), 0, 0)
@@ -126,7 +134,7 @@ class RIXSGui(QMainWindow):
         self.slider_max.valueChanged.connect(self.update_color_scale); color_layout.addWidget(self.slider_max, 2, 1)
         color_group.setLayout(color_layout); sidebar.addWidget(color_group)
 
-        # --- ROI ---
+        # ROI
         roi_pfy_group = QtWidgets.QGroupBox("PFY ROI (Emission Y-Axis)"); roi_pfy_layout = QGridLayout()
         self.roi_pfy_start = QLineEdit(); self.roi_pfy_start.editingFinished.connect(self.update_integrations_from_text); roi_pfy_layout.addWidget(QLabel("Start:"), 0, 0); roi_pfy_layout.addWidget(self.roi_pfy_start, 0, 1)
         self.roi_pfy_end = QLineEdit(); self.roi_pfy_end.editingFinished.connect(self.update_integrations_from_text); roi_pfy_layout.addWidget(QLabel("End:"), 1, 0); roi_pfy_layout.addWidget(self.roi_pfy_end, 1, 1)
@@ -139,9 +147,17 @@ class RIXSGui(QMainWindow):
 
         # --- Plots ---
         self.figure = plt.figure(figsize=(10, 8)); self.canvas = FigureCanvas(self.figure); self.toolbar = NavigationToolbar(self.canvas, self)
-        # Fix: Spacing to prevent axis label overlap
-        self.gs = gridspec.GridSpec(2, 3, width_ratios=[4, 1.2, 0.2], height_ratios=[1, 4], wspace=0.35, hspace=0.35)
-        self.ax_pfy = self.figure.add_subplot(self.gs[0, 0]); self.ax_map = self.figure.add_subplot(self.gs[1, 0], sharex=self.ax_pfy); self.ax_xes = self.figure.add_subplot(self.gs[1, 1], sharey=self.ax_map); self.cax = self.figure.add_subplot(self.gs[1, 2])
+        self.gs = gridspec.GridSpec(2, 3, width_ratios=[4, 1.5, 0.2], height_ratios=[1, 4], wspace=0.35, hspace=0.35)
+        
+        self.ax_pfy = self.figure.add_subplot(self.gs[0, 0])
+        # LEGEND BOX: Dedicated axis in top-right corner
+        self.ax_leg = self.figure.add_subplot(self.gs[0, 1])
+        self.ax_leg.axis('off')
+        
+        self.ax_map = self.figure.add_subplot(self.gs[1, 0], sharex=self.ax_pfy)
+        self.ax_xes = self.figure.add_subplot(self.gs[1, 1], sharey=self.ax_map)
+        self.cax = self.figure.add_subplot(self.gs[1, 2])
+        
         plt.setp(self.ax_pfy.get_xticklabels(), visible=False); plt.setp(self.ax_xes.get_yticklabels(), visible=False)
 
         plot_container = QVBoxLayout(); plot_container.addWidget(self.toolbar); plot_container.addWidget(self.canvas)
@@ -174,71 +190,104 @@ class RIXSGui(QMainWindow):
     def on_checkbox_trigger(self, item, column):
         if item.parent() and item.parent().data(0, USER_ROLE): self.on_tree_selection()
 
+    def on_toggle_counts(self):
+        """Reset everything when flux-correction is toggled to avoid scaling mismatches."""
+        self.clear_overlay()
+
+    def manage_overlay_state(self, checked):
+        if not checked:
+            self.clear_overlay()
+        else:
+            # Capture current set so next selection starts the overlay immediately
+            self.capture_current_to_overlay()
+            self.update_integrations()
+
+    def capture_current_to_overlay(self):
+        if self.current_data is None: return
+        selected = self.scan_tree.selectedItems()
+        label = selected[0].text(0) if selected else "Active"
+        
+        iy_i, iy_f = self.get_integration_indices()
+        ix_i, ix_f = self.get_excitation_indices()
+        d = self.current_data
+
+        raw_pfy = np.sum(d['z_norm'][:, min(iy_i, iy_f):max(iy_i, iy_f)], axis=1)
+        y_pfy = raw_pfy * (d['i0_scale'] / np.sum(d['z_norm'], axis=1)[0]) if self.count_toggle.isChecked() else raw_pfy
+        source_z = d['z_flux'] if self.count_toggle.isChecked() else d['z_norm']
+        x_xes = np.sum(source_z[min(ix_i, ix_f):max(ix_i, ix_f), :], axis=0)
+
+        # Only add if unique
+        if not self.held_pfy or not np.array_equal(self.held_pfy[-1][1], y_pfy):
+            color = self.color_cycle[self.current_color_idx % len(self.color_cycle)]
+            self.held_pfy.append((d['x'], y_pfy, color, label))
+            self.held_xes.append((x_xes, d['y'], color, label))
+            self.current_color_idx += 1
+
+    def clear_overlay(self):
+        self.held_pfy, self.held_xes, self.current_color_idx = [], [], 0
+        # Clear axes to ensure NO ghost curves remain
+        self.ax_pfy.clear(); self.ax_xes.clear(); self.ax_leg.clear(); self.ax_leg.axis('off')
+        self.on_tree_selection()
+
     def get_summed_data(self):
-        """Sums checked scans and handles scaling by retrieving I0 flux ratio."""
         selected_items = self.scan_tree.selectedItems()
         if not selected_items: return None
-        summed_z_norm, common_x, common_y = None, None, None
-        summed_z_flux, summed_pfy_flux_multiplier = None, None
-
+        szn, com_x, com_y, szf, spf = None, None, None, None, None
         for folder_item in selected_items:
-            user_data = folder_item.data(0, USER_ROLE)
-            if not user_data: continue
-            fname, sname = user_data; rixs = self.raw_data[fname][sname]
-
-            # Calculation: Retrieve I0 flux by ratio of raw/normalized maps
-            raw_map = np.sum(rixs['rixs_plane0'], axis=0)
-            norm_map = np.sum(rixs['rixs_plane0_norm'], axis=0)
+            u_data = folder_item.data(0, USER_ROLE)
+            if not u_data: continue
+            fname, sname = u_data; rixs = self.raw_data[fname][sname]
+            raw_m, norm_m = np.sum(rixs['rixs_plane0'], axis=0), np.sum(rixs['rixs_plane0_norm'], axis=0)
             with np.errstate(divide='ignore', invalid='ignore'):
-                i0_array = np.nan_to_num(np.nanmean(raw_map / norm_map, axis=1), nan=1.0)
-
+                i0_arr = np.nan_to_num(np.nanmean(raw_m / norm_m, axis=1), nan=1.0)
             for i in range(folder_item.childCount()):
-                scan_item = folder_item.child(i)
-                if scan_item.checkState(0) == Qt.CheckState.Checked:
+                sc_item = folder_item.child(i)
+                if sc_item.checkState(0) == Qt.CheckState.Checked:
                     z_key = 'rixs_plane1_norm' if 'rixs_plane1_norm' in rixs else 'rixs_plane0_norm'
-                    z_norm = np.sum(rixs[z_key], axis=0)
+                    zn = np.sum(rixs[z_key], axis=0)
                     x, y = rixs['valid_nominal_mono' if 'valid_nominal_mono' in rixs else 'nominal_mono'], rixs['bin_centers']
-                    
-                    # Apply incident-energy-dependent I0 scaling to the map for XES
-                    z_flux = z_norm * i0_array[:, np.newaxis]
-                    # Capture the initial I0 scaling for PFY summing
-                    pfy_flux_factor = i0_array[0]
-
-                    if summed_z_norm is None:
-                        summed_z_norm, common_x, common_y = z_norm.copy(), x, y
-                        summed_z_flux = z_flux.copy()
-                        summed_pfy_flux_multiplier = pfy_flux_factor
-                    elif z_norm.shape == summed_z_norm.shape:
-                        summed_z_norm += z_norm
-                        summed_z_flux += z_flux
-                        summed_pfy_flux_multiplier += pfy_flux_factor
-
-        return {'x': common_x, 'y': common_y, 'z_norm': summed_z_norm, 
-                'z_flux': summed_z_flux, 'i0_scale': summed_pfy_flux_multiplier} if summed_z_norm is not None else None
+                    zf, pf = zn * i0_arr[:, np.newaxis], np.sum(zn, axis=1) * i0_arr[0]
+                    if szn is None: szn, com_x, com_y, szf, spf = zn.copy(), x, y, zf.copy(), pf.copy()
+                    elif zn.shape == szn.shape: szn += zn; szf += zf; spf += pf
+        return {'x': com_x, 'y': com_y, 'z_norm': szn, 'z_flux': szf, 'i0_scale': spf} if szn is not None else None
 
     def on_tree_selection(self):
         new_data = self.get_summed_data()
-        if not new_data: self.ax_map.clear(); self.ax_pfy.clear(); self.ax_xes.clear(); self.canvas.draw(); return
+        if not new_data: 
+            self.ax_map.clear(); self.ax_pfy.clear(); self.ax_xes.clear(); self.canvas.draw(); return
+        
         self.current_data = new_data; d = self.current_data; x_min, x_max = np.min(d['x']), np.max(d['x']); y_min, y_max = np.min(d['y']), np.max(d['y'])
         
         if not self.roi_pfy_start.text(): self.roi_pfy_start.setText(f"{y_min:.2f}"); self.roi_pfy_end.setText(f"{y_max:.2f}")
         if not self.roi_xes_start.text(): self.roi_xes_start.setText(f"{x_min:.2f}"); self.roi_xes_end.setText(f"{x_max:.2f}")
 
-        try: y_s, y_e = float(self.roi_pfy_start.text()), float(self.roi_pfy_end.text()); x_s, x_e = float(self.roi_xes_start.text()), float(self.roi_xes_end.text())
-        except ValueError: y_s, y_e, x_s, x_e = y_min, y_max, x_min, x_max
+        try: ys, ye = float(self.roi_pfy_start.text()), float(self.roi_pfy_end.text()); xs, xe = float(self.roi_xes_start.text()), float(self.roi_xes_end.text())
+        except ValueError: ys, ye, xs, xe = y_min, y_max, x_min, x_max
 
-        self.ax_map.clear(); self.ax_pfy.clear(); self.ax_xes.clear(); self.pfy_line = None; self.xes_line = None
-        
-        # Use scaled map for display if toggle is on
+        self.ax_map.clear()
         disp_z = d['z_flux'] if self.count_toggle.isChecked() else d['z_norm']
         self.map_img = self.ax_map.pcolormesh(d['x'], d['y'], disp_z.T, shading='auto', cmap=self.cmap_combo.currentText())
-        
         self.ax_map.set_xlabel("Incident Energy (eV)"); self.ax_map.set_ylabel("Emission Energy (eV)")
         self.ax_map.set_xlim(x_min, x_max); self.ax_map.set_ylim(y_min, y_max)
         
         if self.selector: self.selector.set_active(False)
-        self.selector = RectangleSelector(self.ax_map, self.on_select_roi, useblit=True, button=[1], minspanx=5, minspany=5, interactive=True); self.selector.extents = (x_s, x_e, y_s, y_e)
+        self.selector = RectangleSelector(self.ax_map, self.on_select_roi, useblit=True, button=[1], minspanx=5, minspany=5, interactive=True); self.selector.extents = (xs, xe, ys, ye)
+        
+        if self.hold_toggle.isChecked(): self.capture_current_to_overlay()
+        
         self.cax.clear(); self.figure.colorbar(self.map_img, cax=self.cax); self.update_color_scale(); self.update_integrations()
+
+    def get_integration_indices(self):
+        d = self.current_data
+        try: y_s, y_e = float(self.roi_pfy_start.text()), float(self.roi_pfy_end.text())
+        except: y_s, y_e = np.min(d['y']), np.max(d['y'])
+        return np.argmin(np.abs(d['y'] - y_s)), np.argmin(np.abs(d['y'] - y_e))
+
+    def get_excitation_indices(self):
+        d = self.current_data
+        try: x_s, x_e = float(self.roi_xes_start.text()), float(self.roi_xes_end.text())
+        except: x_s, x_e = np.min(d['x']), np.max(d['x'])
+        return np.argmin(np.abs(d['x'] - x_s)), np.argmin(np.abs(d['x'] - x_e))
 
     def on_select_roi(self, eclick, erelease):
         x1, x2 = sorted([eclick.xdata, erelease.xdata]); y1, y2 = sorted([eclick.ydata, erelease.ydata])
@@ -250,79 +299,81 @@ class RIXSGui(QMainWindow):
     def update_integrations(self):
         if not self.current_data: return
         d = self.current_data
-        try: y_s, y_e = float(self.roi_pfy_start.text()), float(self.roi_pfy_end.text()); x_s, x_e = float(self.roi_xes_start.text()), float(self.roi_xes_end.text())
-        except ValueError: return
-        if self.selector: self.selector.extents = (x_s, x_e, y_s, y_e)
-        
+        iy_i, iy_f = self.get_integration_indices(); ix_i, ix_f = self.get_excitation_indices()
         unit = "Flux-Corrected Counts" if self.count_toggle.isChecked() else "Normalized Intensity"
-        iy_i, iy_f = np.argmin(np.abs(d['y'] - y_s)), np.argmin(np.abs(d['y'] - y_e))
-        ix_i, ix_f = np.argmin(np.abs(d['x'] - x_s)), np.argmin(np.abs(d['x'] - x_e))
-
-        # PFY: Multiplied by constant initial I0
-        if self.count_toggle.isChecked():
-            # Apply cumulative scale multiplier relative to the normalized sum
-            raw_pfy = np.sum(d['z_norm'][:, min(iy_i, iy_f):max(iy_i, iy_f)], axis=1)
-            # Find the scaling ratio from summed folders
-            self.current_pfy_y = raw_pfy * d['i0_scale']
-        else:
-            self.current_pfy_y = np.sum(d['z_norm'][:, min(iy_i, iy_f):max(iy_i, iy_f)], axis=1)
-        self.current_pfy_x = d['x']
-
-        # XES: Multiplied by energy-dependent I0 array
-        source_z = d['z_flux'] if self.count_toggle.isChecked() else d['z_norm']
-        self.current_xes_x = np.sum(source_z[min(ix_i, ix_f):max(ix_i, ix_f), :], axis=0)
-        self.current_xes_y = d['y']
-
-        if self.pfy_line is None or self.pfy_line not in self.ax_pfy.lines: 
-            self.pfy_line, = self.ax_pfy.plot(self.current_pfy_x, self.current_pfy_y, color='lime')
-        else: self.pfy_line.set_ydata(self.current_pfy_y); self.ax_pfy.relim(); self.ax_pfy.autoscale_view(scalex=False, scaley=True)
-        self.ax_pfy.set_title(f"PFY ({unit})")
-
-        if self.xes_line is None or self.xes_line not in self.ax_xes.lines: 
-            self.xes_line, = self.ax_xes.plot(self.current_xes_x, self.current_xes_y, color='cyan')
-        else: self.xes_line.set_xdata(self.current_xes_x); self.ax_xes.relim(); self.ax_xes.autoscale_view(scalex=True, scaley=False)
-        self.ax_xes.set_xlabel(unit); self.ax_xes.set_title("XES")
         
-        for p in list(self.ax_pfy.patches): p.remove()
-        self.ax_pfy.axvspan(x_s, x_e, color='cyan', alpha=0.1) 
-        for p in list(self.ax_xes.patches): p.remove()
-        self.ax_xes.axhspan(y_s, y_e, color='lime', alpha=0.1)
-        for l in list(self.ax_map.lines): l.remove()
-        self.ax_map.axhline(y_s, color='lime', linestyle='--', linewidth=1); self.ax_map.axhline(y_e, color='lime', linestyle='--', linewidth=1); self.ax_map.axvline(x_s, color='cyan', linestyle='--', linewidth=1); self.ax_map.axvline(x_e, color='cyan', linestyle='--', linewidth=1)
+        raw_pfy = np.sum(d['z_norm'][:, min(iy_i, iy_f):max(iy_i, iy_f)], axis=1)
+        cur_pfy_y = raw_pfy * (d['i0_scale'] / np.sum(d['z_norm'], axis=1)[0]) if self.count_toggle.isChecked() else raw_pfy
+        source_z = d['z_flux'] if self.count_toggle.isChecked() else d['z_norm']
+        cur_xes_x = np.sum(source_z[min(ix_i, ix_f):max(ix_i, ix_f), :], axis=0)
+
+        self.ax_pfy.clear(); self.ax_xes.clear(); self.ax_leg.clear(); self.ax_leg.axis('off')
+        active_label = self.scan_tree.selectedItems()[0].text(0) if self.scan_tree.selectedItems() else "Active"
+
+        # FIX 1 & 2: Suppress duplicate legend items for active folder
+        for px, py, col, lbl in self.held_pfy:
+            # Only plot held curves if they are NOT the currently active one
+            if lbl != active_label:
+                self.ax_pfy.plot(px, py, color=col, alpha=0.6, linestyle='--', label=f"{lbl} (Held)")
+        
+        for xx, xy, col, lbl in self.held_xes:
+            if lbl != active_label:
+                self.ax_xes.plot(xx, xy, color=col, alpha=0.6, linestyle='--')
+
+        # Active Curve
+        act_col = self.color_cycle[self.current_color_idx % len(self.color_cycle)]
+        self.ax_pfy.plot(d['x'], cur_pfy_y, color=act_col, linewidth=2, label=active_label)
+        self.ax_xes.plot(cur_xes_x, d['y'], color=act_col, linewidth=2)
+
+        # FIX 4: Separate legend box
+        if self.hold_toggle.isChecked() or self.held_pfy:
+            h, l = self.ax_pfy.get_legend_handles_labels()
+            self.ax_leg.legend(h, l, loc='center', fontsize='small', frameon=True)
+
+        self.ax_pfy.set_title(f"PFY ({unit})"); self.ax_xes.set_xlabel(unit); self.ax_xes.set_title("XES")
+        self.ax_pfy.set_xlim(np.min(d['x']), np.max(d['x'])); self.ax_xes.set_ylim(np.min(d['y']), np.max(d['y']))
+        self.ax_pfy.relim(); self.ax_pfy.autoscale_view(); self.ax_xes.relim(); self.ax_xes.autoscale_view()
+        
+        try: xs, xe = float(self.roi_xes_start.text()), float(self.roi_xes_end.text()); ys, ye = float(self.roi_pfy_start.text()), float(self.roi_pfy_end.text())
+        except: xs, xe, ys, ye = np.min(d['x']), np.max(d['x']), np.min(d['y']), np.max(d['y'])
+        
+        self.ax_pfy.axvspan(xs, xe, color='cyan', alpha=0.1) 
+        self.ax_xes.axhspan(ys, ye, color='lime', alpha=0.1)
+        for line in list(self.ax_map.lines): line.remove()
+        self.ax_map.axhline(ys, color='lime', linestyle='--', linewidth=1); self.ax_map.axhline(ye, color='lime', linestyle='--', linewidth=1)
+        self.ax_map.axvline(xs, color='cyan', linestyle='--', linewidth=1); self.ax_map.axvline(xe, color='cyan', linestyle='--', linewidth=1)
         self.canvas.draw()
 
     def export_2d_map(self):
-        if self.current_data is None: QMessageBox.warning(self, "Export Error", "No map available."); return
-        path, _ = QFileDialog.getSaveFileName(self, "Save Summed RIXS Map", "summed_rixs_map.pkl.gz", "Gzip Pickle Files (*.pkl.gz)")
+        if not self.current_data: return
+        path, _ = QFileDialog.getSaveFileName(self, "Save RIXS Map", "map.pkl.gz", "Gzip Pickle (*.pkl.gz)")
         if not path: return
         try:
-            export_dict = {'rixs_sum': {'rixs_plane0_norm': np.array([self.current_data['z_norm']]), 'valid_nominal_mono': self.current_data['x'], 'bin_centers': self.current_data['y'], 'sample_name': 'Summed_Result', 'sample_id': 'SUM_ROI'}}
+            export_dict = {'rixs_sum': {'rixs_plane0_norm': np.array([self.current_data['z_norm']]), 'valid_nominal_mono': self.current_data['x'], 'bin_centers': self.current_data['y'], 'sample_name': 'Summed', 'sample_id': 'SUM'}}
             with gzip.open(path, 'wb') as f: cPickle.dump(export_dict, f, protocol=4)
-            QMessageBox.information(self, "Success", f"Summed RIXS map exported successfully.")
         except Exception as e: QMessageBox.critical(self, "Export Failed", str(e))
 
     def export_1d_data(self):
-        if self.current_pfy_x is None: QMessageBox.warning(self, "Export Error", "No curves available."); return
-        path, _ = QFileDialog.getSaveFileName(self, "Save Integrated 1D Curves", "integrated_curves.txt", "Text Files (*.txt)")
+        if not self.current_data: return
+        path, _ = QFileDialog.getSaveFileName(self, "Save Integrated Curves", "curves.txt", "Text Files (*.txt)")
         if not path: return
-        pfy_roi = f"[{self.roi_pfy_start.text()}, {self.roi_pfy_end.text()}]"; xes_roi = f"[{self.roi_xes_start.text()}, {self.roi_xes_end.text()}]"
-        is_scaled = "Flux-Corrected (I0 ratio scaling applied)." if self.count_toggle.isChecked() else "Normalized Intensity (No scaling)."
         try:
             with open(path.replace(".txt", "_pfy.txt"), 'w') as f:
-                f.write(f"# PFY Integrated over Emission ROI: {pfy_roi} eV\n# {is_scaled}\n# Incident_Energy(eV)\tIntensity\n")
-                for x, y in zip(self.current_pfy_x, self.current_pfy_y): f.write(f"{x:.6f}\t{y:.6f}\n")
-            with open(path.replace(".txt", "_xes.txt"), 'w') as f:
-                f.write(f"# XES Integrated over Excitation ROI: {xes_roi} eV\n# {is_scaled}\n# Emission_Energy(eV)\tIntensity\n")
-                for y, x in zip(self.current_xes_y, self.current_xes_x): f.write(f"{y:.6f}\t{x:.6f}\n")
-            QMessageBox.information(self, "Success", f"1D data exported successfully.")
+                f.write(f"# PFY [ROI {self.roi_pfy_start.text()}-{self.roi_pfy_end.text()}]\n# Energy(eV)\tIntensity\n")
+                # Implementation saves active data
+                d = self.current_data
+                iy_i, iy_f = self.get_integration_indices()
+                raw_pfy = np.sum(d['z_norm'][:, min(iy_i, iy_f):max(iy_i, iy_f)], axis=1)
+                y_pfy = raw_pfy * (d['i0_scale'] / np.sum(d['z_norm'], axis=1)[0]) if self.count_toggle.isChecked() else raw_pfy
+                for x, y in zip(d['x'], y_pfy): f.write(f"{x:.6f}\t{y:.6f}\n")
         except Exception as e: QMessageBox.critical(self, "Export Failed", str(e))
 
     def update_color_scale(self):
         if not self.map_img: return
-        raw = self.map_img.get_array(); d_min, d_max = np.min(raw), np.max(raw); vmin, vmax = d_min + (d_max - d_min) * (self.slider_min.value()/100), d_min + (d_max - d_min) * (self.slider_max.value()/100); self.map_img.set_clim(vmin, vmax if vmax > vmin else vmin + 1e-6); self.canvas.draw()
+        raw = self.map_img.get_array(); dmin, dmax = np.min(raw), np.max(raw); vmin, vmax = dmin + (dmax-dmin)*(self.slider_min.value()/100), dmin + (dmax-dmin)*(self.slider_max.value()/100); self.map_img.set_clim(vmin, vmax if vmax > vmin else vmin+1e-6); self.canvas.draw()
 
-    def update_color_map(self, cmap_name):
-        if self.map_img: self.map_img.set_cmap(cmap_name); self.canvas.draw()
+    def update_color_map(self, name):
+        if self.map_img: self.map_img.set_cmap(name); self.canvas.draw()
 
 if __name__ == "__main__":
     app = QApplication(sys.argv); window = RIXSGui(); window.show(); getattr(app, EXEC_FUNC)()
