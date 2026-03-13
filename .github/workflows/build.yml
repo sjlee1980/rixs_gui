@@ -1,50 +1,62 @@
-name: Build RIXS GUI Executables
+name: Build and Release RIXS Analyzer
 
+# This workflow triggers automatically when you push a version tag (e.g., v1.0.0)
 on:
   push:
-    branches: [ "main", "master" ]
-  workflow_dispatch: 
+    tags:
+      - 'v*' 
+
+permissions:
+  contents: write
 
 jobs:
   build:
     name: Build on ${{ matrix.os }}
-    # We force the Linux runner to use 20.04 for maximum GLIBC compatibility
-    runs-on: ${{ matrix.os == 'ubuntu-latest' && 'ubuntu-20.04' || matrix.os }}
+    runs-on: ${{ matrix.os }}
     strategy:
       matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
+        os: [macos-latest, windows-latest, ubuntu-latest]
 
     steps:
     - name: Checkout Code
       uses: actions/checkout@v4
 
-    - name: Set up Python 3.11
+    - name: Set up Python
       uses: actions/setup-python@v5
       with:
-        python-version: '3.11'
+        python-version: '3.10' # Highly stable version for PyInstaller
 
     - name: Install Dependencies
       run: |
         python -m pip install --upgrade pip
-        pip install pyinstaller PyQt6 matplotlib "numpy<2.0"
-
-    - name: Install Linux GUI Dependencies
-      if: matrix.os == 'ubuntu-latest'
-      run: |
-        sudo apt-get update
-        sudo apt-get install -y libegl1 libxcb-cursor0 xvfb
+        pip install pyinstaller numpy matplotlib PyQt6
 
     - name: Build with PyInstaller
-      shell: bash
       run: |
-        if [ "${{ matrix.os }}" = "ubuntu-latest" ]; then
-          xvfb-run pyinstaller --name "RIXS_Analyzer" --onefile --windowed --collect-submodules PyQt6 rixs_gui_matplotlib.py
-        else
-          pyinstaller --name "RIXS_Analyzer" --onefile --windowed --collect-submodules PyQt6 rixs_gui_matplotlib.py
-        fi
+        pyinstaller --name "RIXS_Analyzer" --onefile --windowed rixs_gui_matplotlib.py
 
-    - name: Upload Artifacts
-      uses: actions/upload-artifact@v4
+    # macOS creates a .app directory which GitHub Actions can corrupt if not zipped
+    - name: Zip macOS App Bundle
+      if: matrix.os == 'macos-latest'
+      run: |
+        cd dist
+        zip -r ../RIXS_Analyzer_macOS.zip RIXS_Analyzer.app
+
+    # Move Windows exe out of dist folder and rename it clearly
+    - name: Prepare Windows Executable
+      if: matrix.os == 'windows-latest'
+      run: Copy-Item -Path "dist\RIXS_Analyzer.exe" -Destination "RIXS_Analyzer_Windows.exe"
+
+    # Move Linux executable out of dist folder and rename it clearly
+    - name: Prepare Linux Executable
+      if: matrix.os == 'ubuntu-latest'
+      run: mv dist/RIXS_Analyzer RIXS_Analyzer_Linux
+
+    # Upload everything to the GitHub Release page automatically
+    - name: Upload to GitHub Release
+      uses: softprops/action-gh-release@v1
       with:
-        name: RIXS_Analyzer-${{ matrix.os }}
-        path: dist/RIXS_Analyzer*
+        files: |
+          RIXS_Analyzer_macOS.zip
+          RIXS_Analyzer_Windows.exe
+          RIXS_Analyzer_Linux
