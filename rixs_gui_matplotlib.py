@@ -3,6 +3,7 @@ import os
 import gzip
 import io
 import warnings
+import itertools
 import numpy as np
 import matplotlib
 import matplotlib.pyplot as plt
@@ -31,8 +32,8 @@ try:
     from PyQt6 import QtWidgets, QtCore, QtGui
     from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, 
                                  QHBoxLayout, QGridLayout, QPushButton, QFileDialog, QTreeWidget, QTreeWidgetItem, 
-                                 QAbstractItemView, QLabel, QLineEdit, QSplitter, QComboBox, QSlider, QMessageBox, QCheckBox)
-    from PyQt6.QtCore import Qt
+                                 QAbstractItemView, QLabel, QLineEdit, QComboBox, QSlider, QMessageBox, QCheckBox)
+    from PyQt6.QtCore import Qt, QTimer
     matplotlib.use('QtAgg') 
     from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
     from matplotlib.backends.backend_qtagg import NavigationToolbar2QT as NavigationToolbar
@@ -43,8 +44,8 @@ except ImportError:
     from PyQt5 import QtWidgets, QtCore, QtGui
     from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, 
                                  QHBoxLayout, QGridLayout, QPushButton, QFileDialog, QTreeWidget, QTreeWidgetItem, 
-                                 QAbstractItemView, QLabel, QLineEdit, QSplitter, QComboBox, QSlider, QMessageBox, QCheckBox)
-    from PyQt5.QtCore import Qt
+                                 QAbstractItemView, QLabel, QLineEdit, QComboBox, QSlider, QMessageBox, QCheckBox)
+    from PyQt5.QtCore import Qt, QTimer
     matplotlib.use('Qt5Agg')
     from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
     from matplotlib.backends.backend_qt5agg import NavigationToolbar2QT as NavigationToolbar
@@ -52,10 +53,18 @@ except ImportError:
     USER_ROLE = Qt.UserRole
     SEL_MODE = QAbstractItemView.ExtendedSelection
 
+# --- MATPLOTLIB FONT SIZES ---
+plt.rc('font', size=10)          
+plt.rc('axes', titlesize=11)    
+plt.rc('axes', labelsize=10)     
+plt.rc('xtick', labelsize=9)    
+plt.rc('ytick', labelsize=9)
+plt.rc('legend', fontsize=9)    
+
 class RIXSGui(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("RIXS Analyzer: Persistent Legend & Clipboard")
+        self.setWindowTitle("RIXS Analyzer v1.0.0")
         self.setGeometry(50, 50, 1600, 1000)
         self.raw_data = {}
         
@@ -64,21 +73,51 @@ class RIXSGui(QMainWindow):
         self.selector = None 
         self.cax = None      
         
-        # Overlay and Legend state
+        # Color Palette & Hierarchy
+        self.active_color = 'black'  
+        self.held_style = '-'        
+        self.color_cycle = ['#1f77b4', '#d62728', '#2ca02c', '#ff7f0e', '#9467bd', '#e377c2'] 
+        self.current_color_idx = 0
+        
+        self.active_linewidth = 1.5   
+        self.held_linewidth = 1.0     
+
         self.held_pfy = [] 
         self.held_xes = [] 
-        self.color_cycle = ['lime', 'orange', 'magenta', 'cyan', 'yellow', 'red', 'white']
-        self.current_color_idx = 0
         
         self.init_ui()
 
     def init_ui(self):
+        self.setStyleSheet("""
+            QWidget {
+                font-size: 11pt; 
+            }
+            QTreeWidget::item {
+                padding: 2px;
+            }
+            QGroupBox {
+                margin-top: 2ex;
+            }
+            QGroupBox::title {
+                subcontrol-origin: margin;
+                subcontrol-position: top left;
+                padding: 0 3px;
+            }
+        """)
+
         central_widget = QWidget()
         self.setCentralWidget(central_widget)
         main_layout = QHBoxLayout(central_widget)
 
+        try: 
+            align_vcenter = Qt.AlignmentFlag.AlignVCenter
+        except AttributeError: 
+            align_vcenter = Qt.AlignVCenter
+
         # ==================== SIDEBAR ====================
         sidebar = QVBoxLayout()
+        sidebar.setSpacing(5) 
+        sidebar.setContentsMargins(0, 0, 5, 0)
         
         self.load_btn = QPushButton("Load .pkl.gz Files")
         self.load_btn.clicked.connect(self.load_files)
@@ -90,11 +129,13 @@ class RIXSGui(QMainWindow):
         self.scan_tree.setSelectionMode(SEL_MODE)
         self.scan_tree.itemSelectionChanged.connect(self.on_tree_selection)
         self.scan_tree.itemChanged.connect(self.on_checkbox_trigger) 
-        sidebar.addWidget(self.scan_tree)
+        
+        # Stretch tree to maximize available space
+        sidebar.addWidget(self.scan_tree, 1)
 
-        sidebar.addSpacing(10)
+        sidebar.addSpacing(5)
 
-        # --- Checkboxes for Scaling & Overlay ---
+        # --- Toggles & Overlay Controls ---
         self.count_toggle = QCheckBox("Show Flux-Corrected Counts")
         self.count_toggle.clicked.connect(self.on_toggle_counts)
         sidebar.addWidget(self.count_toggle)
@@ -103,96 +144,238 @@ class RIXSGui(QMainWindow):
         self.norm_max_toggle.clicked.connect(self.on_tree_selection)
         sidebar.addWidget(self.norm_max_toggle)
 
+        overlay_layout = QHBoxLayout()
         self.hold_toggle = QCheckBox("Hold Curves (Overlay)")
         self.hold_toggle.toggled.connect(self.manage_overlay_state)
-        sidebar.addWidget(self.hold_toggle)
-
         self.clear_overlay_btn = QPushButton("Clear Overlay")
         self.clear_overlay_btn.clicked.connect(self.clear_overlay)
-        sidebar.addWidget(self.clear_overlay_btn)
+        overlay_layout.addWidget(self.hold_toggle)
+        overlay_layout.addStretch()
+        overlay_layout.addWidget(self.clear_overlay_btn)
+        sidebar.addLayout(overlay_layout)
 
-        sidebar.addSpacing(10)
-        
-        self.save_map_btn = QPushButton("Save Summed RIXS Map (.pkl.gz)")
-        self.save_map_btn.setStyleSheet("background-color: #1976d2; color: white; font-weight: bold; padding: 5px;")
-        self.save_map_btn.clicked.connect(self.export_2d_map)
-        sidebar.addWidget(self.save_map_btn)
-
-        self.export_btn = QPushButton("Save Active 1D Curves (.txt)")
-        self.export_btn.setStyleSheet("background-color: #2e7d32; color: white; font-weight: bold; padding: 5px;")
-        self.export_btn.clicked.connect(self.export_1d_data)
-        sidebar.addWidget(self.export_btn)
-        
-        sidebar.addSpacing(10)
+        sidebar.addSpacing(5)
 
         # --- Color Settings ---
         color_group = QtWidgets.QGroupBox("Color Settings")
         color_layout = QGridLayout()
+        color_layout.setContentsMargins(5, 5, 5, 5)
+        color_layout.setSpacing(4)
+        
         color_layout.addWidget(QLabel("CMap:"), 0, 0)
-        self.cmap_combo = QComboBox(); self.cmap_combo.addItems(['viridis', 'plasma', 'inferno', 'magma', 'gray', 'seismic', 'jet'])
+        self.cmap_combo = QComboBox()
+        self.cmap_combo.addItems(['viridis', 'plasma', 'inferno', 'magma', 'gray', 'seismic', 'jet'])
         self.cmap_combo.currentTextChanged.connect(self.update_color_map)
         color_layout.addWidget(self.cmap_combo, 0, 1)
-        color_layout.addWidget(QLabel("Min:"), 1, 0)
-        self.slider_min = QSlider(Qt.Orientation.Horizontal); self.slider_min.setRange(0, 100); self.slider_min.setValue(0)
-        self.slider_min.valueChanged.connect(self.update_color_scale); color_layout.addWidget(self.slider_min, 1, 1)
-        color_layout.addWidget(QLabel("Max:"), 2, 0)
-        self.slider_max = QSlider(Qt.Orientation.Horizontal); self.slider_max.setRange(0, 100); self.slider_max.setValue(100)
-        self.slider_max.valueChanged.connect(self.update_color_scale); color_layout.addWidget(self.slider_max, 2, 1)
+        
+        self.slider_min = QSlider(Qt.Orientation.Horizontal)
+        self.slider_min.setRange(0, 100); self.slider_min.setValue(0)
+        self.slider_min.valueChanged.connect(self.update_color_scale)
+        color_layout.addWidget(QLabel("Min:"), 1, 0); color_layout.addWidget(self.slider_min, 1, 1)
+        
+        self.slider_max = QSlider(Qt.Orientation.Horizontal)
+        self.slider_max.setRange(0, 100); self.slider_max.setValue(100)
+        self.slider_max.valueChanged.connect(self.update_color_scale)
+        color_layout.addWidget(QLabel("Max:"), 2, 0); color_layout.addWidget(self.slider_max, 2, 1)
         color_group.setLayout(color_layout); sidebar.addWidget(color_group)
 
-        # --- ROI ---
-        roi_pfy_group = QtWidgets.QGroupBox("PFY ROI (Emission Y-Axis)"); roi_pfy_layout = QGridLayout()
-        self.roi_pfy_start = QLineEdit(); self.roi_pfy_start.editingFinished.connect(self.update_integrations_from_text); roi_pfy_layout.addWidget(QLabel("Start:"), 0, 0); roi_pfy_layout.addWidget(self.roi_pfy_start, 0, 1)
-        self.roi_pfy_end = QLineEdit(); self.roi_pfy_end.editingFinished.connect(self.update_integrations_from_text); roi_pfy_layout.addWidget(QLabel("End:"), 1, 0); roi_pfy_layout.addWidget(self.roi_pfy_end, 1, 1)
-        roi_pfy_group.setLayout(roi_pfy_layout); sidebar.addWidget(roi_pfy_group)
+        sidebar.addSpacing(5)
 
-        roi_xes_group = QtWidgets.QGroupBox("XES ROI (Excitation X-Axis)"); roi_xes_layout = QGridLayout()
-        self.roi_xes_start = QLineEdit(); self.roi_xes_start.editingFinished.connect(self.update_integrations_from_text); roi_xes_layout.addWidget(QLabel("Start:"), 0, 0); roi_xes_layout.addWidget(self.roi_xes_start, 0, 1)
-        self.roi_xes_end = QLineEdit(); self.roi_xes_end.editingFinished.connect(self.update_integrations_from_text); roi_xes_layout.addWidget(QLabel("End:"), 1, 0); roi_xes_layout.addWidget(self.roi_xes_end, 1, 1)
-        roi_xes_group.setLayout(roi_xes_layout); sidebar.addWidget(roi_xes_group)
+        # --- Compact ROI Inputs (Fixed identical widths) ---
+        
+        # PFY Block
+        pfy_container = QVBoxLayout()
+        pfy_header = QHBoxLayout()
+        pfy_header.setContentsMargins(0, 0, 0, 0)
+        pfy_header.addWidget(QLabel("<b>PFY ROI (Emission Y-Axis)</b>"), alignment=align_vcenter)
+        btn_reset_pfy = QPushButton("Reset")
+        btn_reset_pfy.clicked.connect(self.reset_roi_pfy)
+        pfy_header.addWidget(btn_reset_pfy, alignment=align_vcenter)
+        pfy_header.addStretch()
+        
+        pfy_inputs = QHBoxLayout()
+        pfy_inputs.setContentsMargins(5, 0, 5, 5)
+        pfy_inputs.setSpacing(4)
+        
+        self.roi_pfy_start = QLineEdit()
+        self.roi_pfy_start.setFixedWidth(70)
+        self.roi_pfy_start.editingFinished.connect(self.update_integrations_from_text)
+        
+        self.roi_pfy_end = QLineEdit()
+        self.roi_pfy_end.setFixedWidth(70)
+        self.roi_pfy_end.editingFinished.connect(self.update_integrations_from_text)
+        
+        pfy_inputs.addWidget(QLabel("Start:"))
+        pfy_inputs.addWidget(self.roi_pfy_start)
+        pfy_inputs.addSpacing(10)
+        pfy_inputs.addWidget(QLabel("End:"))
+        pfy_inputs.addWidget(self.roi_pfy_end)
+        pfy_inputs.addStretch()
+        
+        pfy_container.addLayout(pfy_header)
+        pfy_container.addLayout(pfy_inputs)
+        sidebar.addLayout(pfy_container)
+
+        # XES Block
+        xes_container = QVBoxLayout()
+        xes_header = QHBoxLayout()
+        xes_header.setContentsMargins(0, 0, 0, 0)
+        xes_header.addWidget(QLabel("<b>XES ROI (Excitation X-Axis)</b>"), alignment=align_vcenter)
+        btn_reset_xes = QPushButton("Reset")
+        btn_reset_xes.clicked.connect(self.reset_roi_xes)
+        xes_header.addWidget(btn_reset_xes, alignment=align_vcenter)
+        xes_header.addStretch()
+        
+        xes_inputs = QHBoxLayout()
+        xes_inputs.setContentsMargins(5, 0, 5, 5)
+        xes_inputs.setSpacing(4)
+        
+        self.roi_xes_start = QLineEdit()
+        self.roi_xes_start.setFixedWidth(70)
+        self.roi_xes_start.editingFinished.connect(self.update_integrations_from_text)
+        
+        self.roi_xes_end = QLineEdit()
+        self.roi_xes_end.setFixedWidth(70)
+        self.roi_xes_end.editingFinished.connect(self.update_integrations_from_text)
+        
+        xes_inputs.addWidget(QLabel("Start:"))
+        xes_inputs.addWidget(self.roi_xes_start)
+        xes_inputs.addSpacing(10)
+        xes_inputs.addWidget(QLabel("End:"))
+        xes_inputs.addWidget(self.roi_xes_end)
+        xes_inputs.addStretch()
+
+        xes_container.addLayout(xes_header)
+        xes_container.addLayout(xes_inputs)
+        sidebar.addLayout(xes_container)
+
+        # Push everything in the sidebar tightly to the top
+        sidebar.addStretch()
 
         # --- Plots ---
-        self.figure = plt.figure(figsize=(10, 8)); self.canvas = FigureCanvas(self.figure); self.toolbar = NavigationToolbar(self.canvas, self)
-        self.gs = gridspec.GridSpec(2, 3, width_ratios=[4, 1.5, 0.2], height_ratios=[1, 4], wspace=0.35, hspace=0.35)
+        self.figure = plt.figure(figsize=(10, 8))
+        
+        # Maximize figure space and increase the right margin so the Colorbar labels are fully visible
+        self.figure.subplots_adjust(left=0.08, right=0.92, top=0.93, bottom=0.12)
+        
+        self.canvas = FigureCanvas(self.figure)
+        self.toolbar = NavigationToolbar(self.canvas, self)
+        
+        self.canvas.mpl_connect('button_press_event', self.on_canvas_click)
+
+        # Narrowed XES (ratio 1.1 down from 1.5) and increased wspace to separate the panels cleanly
+        self.gs = gridspec.GridSpec(3, 3, width_ratios=[4, 1.1, 0.08], height_ratios=[1, 2, 2], wspace=0.3, hspace=0.35)
         
         self.ax_pfy = self.figure.add_subplot(self.gs[0, 0])
         self.ax_leg = self.figure.add_subplot(self.gs[0, 1])
         self.ax_leg.axis('off')
         
-        self.ax_map = self.figure.add_subplot(self.gs[1, 0], sharex=self.ax_pfy)
-        self.ax_xes = self.figure.add_subplot(self.gs[1, 1], sharey=self.ax_map)
-        self.cax = self.figure.add_subplot(self.gs[1, 2])
+        self.ax_map = self.figure.add_subplot(self.gs[1:, 0], sharex=self.ax_pfy)
+        self.ax_xes = self.figure.add_subplot(self.gs[1:, 1], sharey=self.ax_map)
         
-        plt.setp(self.ax_pfy.get_xticklabels(), visible=False); plt.setp(self.ax_xes.get_yticklabels(), visible=False)
+        self.cax = self.figure.add_subplot(self.gs[2, 2]) 
+        
+        plt.setp(self.ax_pfy.get_xticklabels(), visible=False)
+        plt.setp(self.ax_xes.get_yticklabels(), visible=False)
 
-        # ==================== PLOT CONTAINER (With Inline Copy Buttons) ====================
+        # --- Compact Canvas Watermark ---
+        self.info_text = self.figure.text(0.98, 0.02, 
+            "RIXS Analyzer v1.0.0 | SSRL / SLAC National Accelerator Laboratory | Contact: sangjun2@slac.stanford.edu", 
+            ha='right', va='bottom', fontsize=9, color='gray')
+
+        self.apply_os_theme()
+
+        # ==================== PLOT CONTAINER (With Grid-Aligned Buttons) ====================
         plot_container = QVBoxLayout()
+        header_layout = QHBoxLayout()
+        header_layout.addWidget(self.toolbar)
+        header_layout.addStretch() 
         
-        toolbar_layout = QHBoxLayout()
-        toolbar_layout.addWidget(self.toolbar)
-        toolbar_layout.addStretch() 
+        button_grid = QGridLayout()
+        button_grid.setSpacing(10) 
         
-        self.btn_copy_pfy = QPushButton("Copy PFY Plot")
-        self.btn_copy_xes = QPushButton("Copy XES Plot")
-        self.btn_copy_map = QPushButton("Copy 2D Map")
-        self.btn_copy_all = QPushButton("Copy Full Window")
+        # Row 0: Copy Tools
+        self.btn_copy_pfy = QPushButton("Copy PFY")
+        self.btn_copy_xes = QPushButton("Copy XES")
+        self.btn_copy_map = QPushButton("Copy Map")
+        self.btn_copy_all = QPushButton("Copy Full")
         
         self.btn_copy_pfy.clicked.connect(lambda: self.copy_to_clipboard('pfy'))
         self.btn_copy_xes.clicked.connect(lambda: self.copy_to_clipboard('xes'))
         self.btn_copy_map.clicked.connect(lambda: self.copy_to_clipboard('map'))
         self.btn_copy_all.clicked.connect(lambda: self.copy_to_clipboard('all'))
 
-        for btn in [self.btn_copy_pfy, self.btn_copy_xes, self.btn_copy_map, self.btn_copy_all]:
-            btn.setStyleSheet("padding: 4px 8px; font-weight: bold;")
-            toolbar_layout.addWidget(btn)
+        button_grid.addWidget(self.btn_copy_pfy, 0, 0)
+        button_grid.addWidget(self.btn_copy_xes, 0, 1)
+        button_grid.addWidget(self.btn_copy_map, 0, 2)
+        button_grid.addWidget(self.btn_copy_all, 0, 3)
 
-        plot_container.addLayout(toolbar_layout)
+        # Row 1: Save Tools (Spanning 2 columns each)
+        self.save_map_btn = QPushButton("Save Map (.pkl.gz)")
+        self.export_btn = QPushButton("Save 1D Curves (.txt)")
+        
+        self.save_map_btn.clicked.connect(self.export_2d_map)
+        self.export_btn.clicked.connect(self.export_1d_data)
+
+        button_grid.addWidget(self.save_map_btn, 1, 0, 1, 2)
+        button_grid.addWidget(self.export_btn, 1, 2, 1, 2)
+
+        header_layout.addLayout(button_grid)
+        
+        plot_container.addLayout(header_layout)
         plot_container.addWidget(self.canvas)
         
         main_layout.addLayout(sidebar, 1)
         main_layout.addLayout(plot_container, 4)
         
         self.statusBar().showMessage("Ready")
+
+    def changeEvent(self, event):
+        try:
+            pal_change = QtCore.QEvent.Type.PaletteChange
+            app_pal_change = QtCore.QEvent.Type.ApplicationPaletteChange
+        except AttributeError:
+            pal_change = QtCore.QEvent.PaletteChange
+            app_pal_change = QtCore.QEvent.ApplicationPaletteChange
+            
+        if event.type() in [pal_change, app_pal_change]:
+            self.apply_os_theme()
+            self.canvas.draw_idle()
+        super().changeEvent(event)
+
+    def apply_os_theme(self):
+        palette = QApplication.palette()
+        try: text_role = QtGui.QPalette.ColorRole.WindowText
+        except AttributeError: text_role = QtGui.QPalette.WindowText
+            
+        is_dark = palette.color(text_role).lightness() > 128
+        
+        fig_bg = '#2b2b2b' if is_dark else '#f0f0f0' 
+        text_col = '#ffffff' if is_dark else '#000000'
+        spine_col = '#666666' if is_dark else '#333333'
+        watermark_col = '#888888' if is_dark else '#666666'
+        
+        self.figure.patch.set_facecolor(fig_bg)
+        self.info_text.set_color(watermark_col)
+        
+        for ax in [self.ax_pfy, self.ax_xes, self.ax_map, self.cax]:
+            if ax != self.cax:
+                ax.set_facecolor('white') 
+            
+            ax.tick_params(colors=text_col, which='both') 
+            ax.xaxis.label.set_color(text_col)
+            ax.yaxis.label.set_color(text_col)
+            ax.title.set_color(text_col)
+            
+            for spine in ax.spines.values():
+                spine.set_color(spine_col)
+                
+        if self.ax_leg.get_legend():
+            leg = self.ax_leg.get_legend()
+            leg.get_frame().set_facecolor(fig_bg)
+            leg.get_frame().set_edgecolor('none')
+            for text in leg.get_texts():
+                text.set_color(text_col)
 
     def load_files(self):
         files, _ = QFileDialog.getOpenFileNames(self, "Open RIXS Data")
@@ -316,7 +499,52 @@ class RIXSGui(QMainWindow):
         
         if self.hold_toggle.isChecked(): self.capture_current_to_overlay()
         
-        self.cax.clear(); self.figure.colorbar(self.map_img, cax=self.cax); self.update_color_scale(); self.update_integrations()
+        self.cax.clear(); self.figure.colorbar(self.map_img, cax=self.cax); self.update_color_scale()
+        self.update_integrations()
+
+    def on_canvas_click(self, event):
+        if event.dblclick and event.inaxes == self.ax_map:
+            QTimer.singleShot(10, self.reset_roi_all)
+
+    def reset_roi_pfy(self):
+        if not self.current_data: return
+        y_min, y_max = np.min(self.current_data['y']), np.max(self.current_data['y'])
+        self.roi_pfy_start.setText(f"{y_min:.2f}"); self.roi_pfy_end.setText(f"{y_max:.2f}")
+        
+        if self.selector: 
+            try: xs, xe = float(self.roi_xes_start.text()), float(self.roi_xes_end.text())
+            except ValueError: xs, xe = np.min(self.current_data['x']), np.max(self.current_data['x'])
+            self.selector.extents = (xs, xe, y_min, y_max)
+            self.selector.set_visible(True)
+            
+        self.update_integrations()
+
+    def reset_roi_xes(self):
+        if not self.current_data: return
+        x_min, x_max = np.min(self.current_data['x']), np.max(self.current_data['x'])
+        self.roi_xes_start.setText(f"{x_min:.2f}"); self.roi_xes_end.setText(f"{x_max:.2f}")
+        
+        if self.selector: 
+            try: ys, ye = float(self.roi_pfy_start.text()), float(self.roi_pfy_end.text())
+            except ValueError: ys, ye = np.min(self.current_data['y']), np.max(self.current_data['y'])
+            self.selector.extents = (x_min, x_max, ys, ye)
+            self.selector.set_visible(True)
+            
+        self.update_integrations()
+        
+    def reset_roi_all(self):
+        if not self.current_data: return
+        d = self.current_data
+        x_min, x_max = np.min(d['x']), np.max(d['x'])
+        y_min, y_max = np.min(d['y']), np.max(d['y'])
+        self.roi_xes_start.setText(f"{x_min:.2f}"); self.roi_xes_end.setText(f"{x_max:.2f}")
+        self.roi_pfy_start.setText(f"{y_min:.2f}"); self.roi_pfy_end.setText(f"{y_max:.2f}")
+        
+        if self.selector: 
+            self.selector.extents = (x_min, x_max, y_min, y_max)
+            self.selector.set_visible(True)
+            
+        self.update_integrations()
 
     def get_integration_indices(self):
         d = self.current_data
@@ -333,7 +561,12 @@ class RIXSGui(QMainWindow):
     def on_select_roi(self, eclick, erelease):
         if eclick.xdata is None or erelease.xdata is None: return
         x1, x2 = sorted([eclick.xdata, erelease.xdata]); y1, y2 = sorted([eclick.ydata, erelease.ydata])
-        self.roi_xes_start.setText(f"{x1:.2f}"); self.roi_xes_end.setText(f"{x2:.2f}"); self.roi_pfy_start.setText(f"{y1:.2f}"); self.roi_pfy_end.setText(f"{y2:.2f}")
+        
+        if abs(x2 - x1) < 1e-4 and abs(y2 - y1) < 1e-4:
+            return
+            
+        self.roi_xes_start.setText(f"{x1:.2f}"); self.roi_xes_end.setText(f"{x2:.2f}")
+        self.roi_pfy_start.setText(f"{y1:.2f}"); self.roi_pfy_end.setText(f"{y2:.2f}")
         self.update_integrations()
 
     def update_integrations_from_text(self): self.update_integrations()
@@ -362,24 +595,44 @@ class RIXSGui(QMainWindow):
         for px, py, col, lbl in self.held_pfy:
             if lbl != active_label: 
                 plot_y = py / np.max(py) if (self.norm_max_toggle.isChecked() and np.max(py) != 0) else py
-                self.ax_pfy.plot(px, plot_y, color=col, alpha=0.6, linestyle='--', label=f"{lbl}")
+                self.ax_pfy.plot(px, plot_y, color=col, alpha=0.7, linestyle=self.held_style, linewidth=self.held_linewidth, label=f"{lbl}")
                 
         for xx, xy, col, lbl in self.held_xes:
             if lbl != active_label: 
                 plot_x = xx / np.max(xx) if (self.norm_max_toggle.isChecked() and np.max(xx) != 0) else xx
-                self.ax_xes.plot(plot_x, xy, color=col, alpha=0.6, linestyle='--')
+                self.ax_xes.plot(plot_x, xy, color=col, alpha=0.7, linestyle=self.held_style, linewidth=self.held_linewidth)
 
-        act_col = self.color_cycle[self.current_color_idx % len(self.color_cycle)]
         plot_cur_pfy_y = cur_pfy_y / np.max(cur_pfy_y) if (self.norm_max_toggle.isChecked() and np.max(cur_pfy_y) != 0) else cur_pfy_y
         plot_cur_xes_x = cur_xes_x / np.max(cur_xes_x) if (self.norm_max_toggle.isChecked() and np.max(cur_xes_x) != 0) else cur_xes_x
         
-        self.ax_pfy.plot(d['x'], plot_cur_pfy_y, color=act_col, linewidth=2, label=active_label)
-        self.ax_xes.plot(plot_cur_xes_x, d['y'], color=act_col, linewidth=2)
+        self.ax_pfy.plot(d['x'], plot_cur_pfy_y, color=self.active_color, linewidth=self.active_linewidth, label=active_label)
+        self.ax_xes.plot(plot_cur_xes_x, d['y'], color=self.active_color, linewidth=self.active_linewidth)
 
-        # Legend Handling - Always Display
         h, l = self.ax_pfy.get_legend_handles_labels()
         if h:
-            self.ax_leg.legend(h, l, loc='center', fontsize='small', frameon=True)
+            try: text_role = QtGui.QPalette.ColorRole.WindowText
+            except AttributeError: text_role = QtGui.QPalette.WindowText
+            is_dark = QApplication.palette().color(text_role).lightness() > 128
+            
+            text_col = '#ffffff' if is_dark else '#000000'
+            fig_bg = self.figure.patch.get_facecolor()
+            
+            num_items = len(h)
+            if num_items <= 7:
+                ncols = 1
+                font_sz = 'small'
+            elif num_items <= 16:
+                ncols = 2
+                font_sz = 'x-small'
+            else:
+                ncols = 3
+                font_sz = 'xx-small'
+
+            leg = self.ax_leg.legend(h, l, loc='center', frameon=True, ncol=ncols, fontsize=font_sz)
+            leg.get_frame().set_facecolor(fig_bg)
+            leg.get_frame().set_edgecolor('none')
+            for text in leg.get_texts():
+                text.set_color(text_col)
 
         self.ax_pfy.set_title(f"PFY ({unit})"); self.ax_xes.set_xlabel(unit); self.ax_xes.set_title("XES")
         self.ax_pfy.set_xlim(np.min(d['x']), np.max(d['x'])); self.ax_xes.set_ylim(np.min(d['y']), np.max(d['y']))
@@ -392,6 +645,8 @@ class RIXSGui(QMainWindow):
         for line in list(self.ax_map.lines): line.remove()
         self.ax_map.axhline(ys, color='lime', linestyle='--', linewidth=1); self.ax_map.axhline(ye, color='lime', linestyle='--', linewidth=1)
         self.ax_map.axvline(xs, color='cyan', linestyle='--', linewidth=1); self.ax_map.axvline(xe, color='cyan', linestyle='--', linewidth=1)
+        
+        self.apply_os_theme()
         self.canvas.draw()
 
     def copy_to_clipboard(self, target):
@@ -411,7 +666,6 @@ class RIXSGui(QMainWindow):
             elif target == 'xes':
                 bbox = self.ax_xes.get_tightbbox(renderer).transformed(self.figure.dpi_scale_trans.inverted())
             elif target == 'map':
-                # Strictly isolate the map axis
                 bbox = self.ax_map.get_tightbbox(renderer).transformed(self.figure.dpi_scale_trans.inverted())
             elif target == 'all':
                 bbox = 'tight'
@@ -435,14 +689,35 @@ class RIXSGui(QMainWindow):
         try:
             export_dict = {'rixs_sum': {'rixs_plane0_norm': np.array([self.current_data['z_norm']]), 'valid_nominal_mono': self.current_data['x'], 'bin_centers': self.current_data['y'], 'sample_name': 'Summed', 'sample_id': 'SUM'}}
             with gzip.open(path, 'wb') as f: cPickle.dump(export_dict, f, protocol=4)
+            QMessageBox.information(self, "Success", "2D RIXS map exported successfully.")
         except Exception as e: QMessageBox.critical(self, "Export Failed", str(e))
 
     def export_1d_data(self):
         if not self.current_data: return
         path, _ = QFileDialog.getSaveFileName(self, "Save Integrated Curves", "curves.txt", "Text Files (*.txt)")
         if not path: return
+        
+        pfy_path = path.replace(".txt", "_pfy.txt")
+        xes_path = path.replace(".txt", "_xes.txt")
+        
+        try:
+            BTN_YES = QMessageBox.StandardButton.Yes
+            BTN_NO = QMessageBox.StandardButton.No
+        except AttributeError:
+            BTN_YES = QMessageBox.Yes
+            BTN_NO = QMessageBox.No
+
+        if os.path.exists(pfy_path) or os.path.exists(xes_path):
+            reply = QMessageBox.question(self, 'Overwrite Confirmation', 
+                                         f"Files are about to be overwritten:\n{os.path.basename(pfy_path)}\n{os.path.basename(xes_path)}\n\nDo you want to proceed?",
+                                         BTN_YES | BTN_NO, BTN_NO)
+            if reply == BTN_NO:
+                return
+
         try:
             d = self.current_data
+            active_label = self.scan_tree.selectedItems()[0].text(0) if self.scan_tree.selectedItems() else "Active"
+            
             iy_i, iy_f = self.get_integration_indices()
             raw_pfy = np.sum(d['z_norm'][:, min(iy_i, iy_f):max(iy_i, iy_f)], axis=1)
             
@@ -455,9 +730,24 @@ class RIXSGui(QMainWindow):
             if self.norm_max_toggle.isChecked() and np.max(y_pfy) != 0:
                 y_pfy = y_pfy / np.max(y_pfy)
 
-            with open(path.replace(".txt", "_pfy.txt"), 'w') as f:
-                f.write(f"# PFY [ROI {self.roi_pfy_start.text()}-{self.roi_pfy_end.text()}]\n# Energy(eV)\tIntensity\n")
-                for x, y in zip(d['x'], y_pfy): f.write(f"{x:.6f}\t{y:.6f}\n")
+            pfy_curves = [(d['x'], y_pfy, active_label)]
+            for px, py, col, lbl in self.held_pfy:
+                if lbl != active_label:
+                    plot_y = py / np.max(py) if (self.norm_max_toggle.isChecked() and np.max(py) != 0) else py
+                    pfy_curves.append((px, plot_y, lbl))
+
+            headers_pfy = []
+            cols_pfy = []
+            for px, py, lbl in pfy_curves:
+                headers_pfy.extend([f"Energy_eV_{lbl}", f"Intensity_{lbl}"])
+                cols_pfy.extend([px, py])
+                
+            with open(pfy_path, 'w') as f:
+                f.write(f"# PFY [ROI {self.roi_pfy_start.text()}-{self.roi_pfy_end.text()}]\n")
+                f.write("# " + "\t".join(headers_pfy) + "\n")
+                for row in itertools.zip_longest(*cols_pfy, fillvalue=""):
+                    row_strs = [f"{v:.6f}" if isinstance(v, (int, float, np.floating)) else str(v) for v in row]
+                    f.write("\t".join(row_strs) + "\n")
 
             ix_i, ix_f = self.get_excitation_indices()
             source_z = d['z_flux'] if self.count_toggle.isChecked() else d['z_norm']
@@ -465,12 +755,27 @@ class RIXSGui(QMainWindow):
 
             if self.norm_max_toggle.isChecked() and np.max(x_xes) != 0:
                 x_xes = x_xes / np.max(x_xes)
+
+            xes_curves = [(d['y'], x_xes, active_label)]
+            for xx, xy, col, lbl in self.held_xes:
+                if lbl != active_label:
+                    plot_x = xx / np.max(xx) if (self.norm_max_toggle.isChecked() and np.max(xx) != 0) else xx
+                    xes_curves.append((xy, plot_x, lbl)) 
+
+            headers_xes = []
+            cols_xes = []
+            for energy, intensity, lbl in xes_curves:
+                headers_xes.extend([f"Emission_eV_{lbl}", f"Intensity_{lbl}"])
+                cols_xes.extend([energy, intensity])
+
+            with open(xes_path, 'w') as f:
+                f.write(f"# XES [ROI {self.roi_xes_start.text()}-{self.roi_xes_end.text()}]\n")
+                f.write("# " + "\t".join(headers_xes) + "\n")
+                for row in itertools.zip_longest(*cols_xes, fillvalue=""):
+                    row_strs = [f"{v:.6f}" if isinstance(v, (int, float, np.floating)) else str(v) for v in row]
+                    f.write("\t".join(row_strs) + "\n")
                 
-            with open(path.replace(".txt", "_xes.txt"), 'w') as f:
-                f.write(f"# XES [ROI {self.roi_xes_start.text()}-{self.roi_xes_end.text()}]\n# Emission_Energy(eV)\tIntensity\n")
-                for y, x in zip(d['y'], x_xes): f.write(f"{y:.6f}\t{x:.6f}\n")
-                
-            QMessageBox.information(self, "Success", "1D active curves exported successfully.")
+            QMessageBox.information(self, "Success", "All displayed 1D curves exported successfully.")
         except Exception as e: QMessageBox.critical(self, "Export Failed", str(e))
 
     def update_color_scale(self):
