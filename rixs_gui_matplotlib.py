@@ -1,10 +1,12 @@
 import sys
 import os
 import gzip
+import io
 import warnings
 import numpy as np
 import matplotlib
 import matplotlib.pyplot as plt
+import matplotlib.transforms as mtransforms
 import matplotlib.gridspec as gridspec
 from matplotlib.widgets import RectangleSelector
 
@@ -53,7 +55,7 @@ except ImportError:
 class RIXSGui(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("RIXS Analyzer: Perfected ROI & Overlay")
+        self.setWindowTitle("RIXS Analyzer: Persistent Legend & Clipboard")
         self.setGeometry(50, 50, 1600, 1000)
         self.raw_data = {}
         
@@ -67,9 +69,6 @@ class RIXSGui(QMainWindow):
         self.held_xes = [] 
         self.color_cycle = ['lime', 'orange', 'magenta', 'cyan', 'yellow', 'red', 'white']
         self.current_color_idx = 0
-        
-        # Track lines to prevent deleting ROI handles
-        self.roi_crosshairs = []
         
         self.init_ui()
 
@@ -166,8 +165,34 @@ class RIXSGui(QMainWindow):
         
         plt.setp(self.ax_pfy.get_xticklabels(), visible=False); plt.setp(self.ax_xes.get_yticklabels(), visible=False)
 
-        plot_container = QVBoxLayout(); plot_container.addWidget(self.toolbar); plot_container.addWidget(self.canvas)
-        main_layout.addLayout(sidebar, 1); main_layout.addLayout(plot_container, 4)
+        # ==================== PLOT CONTAINER (With Inline Copy Buttons) ====================
+        plot_container = QVBoxLayout()
+        
+        toolbar_layout = QHBoxLayout()
+        toolbar_layout.addWidget(self.toolbar)
+        toolbar_layout.addStretch() 
+        
+        self.btn_copy_pfy = QPushButton("Copy PFY Plot")
+        self.btn_copy_xes = QPushButton("Copy XES Plot")
+        self.btn_copy_map = QPushButton("Copy 2D Map")
+        self.btn_copy_all = QPushButton("Copy Full Window")
+        
+        self.btn_copy_pfy.clicked.connect(lambda: self.copy_to_clipboard('pfy'))
+        self.btn_copy_xes.clicked.connect(lambda: self.copy_to_clipboard('xes'))
+        self.btn_copy_map.clicked.connect(lambda: self.copy_to_clipboard('map'))
+        self.btn_copy_all.clicked.connect(lambda: self.copy_to_clipboard('all'))
+
+        for btn in [self.btn_copy_pfy, self.btn_copy_xes, self.btn_copy_map, self.btn_copy_all]:
+            btn.setStyleSheet("padding: 4px 8px; font-weight: bold;")
+            toolbar_layout.addWidget(btn)
+
+        plot_container.addLayout(toolbar_layout)
+        plot_container.addWidget(self.canvas)
+        
+        main_layout.addLayout(sidebar, 1)
+        main_layout.addLayout(plot_container, 4)
+        
+        self.statusBar().showMessage("Ready")
 
     def load_files(self):
         files, _ = QFileDialog.getOpenFileNames(self, "Open RIXS Data")
@@ -224,7 +249,6 @@ class RIXSGui(QMainWindow):
         source_z = d['z_flux'] if self.count_toggle.isChecked() else d['z_norm']
         x_xes = np.sum(source_z[min(ix_i, ix_f):max(ix_i, ix_f), :], axis=0)
 
-        # BUG FIX 1: Overwrite existing entry with the same label to prevent duplicates
         self.held_pfy = [item for item in self.held_pfy if item[3] != label]
         self.held_xes = [item for item in self.held_xes if item[3] != label]
 
@@ -277,7 +301,6 @@ class RIXSGui(QMainWindow):
         try: ys, ye = float(self.roi_pfy_start.text()), float(self.roi_pfy_end.text()); xs, xe = float(self.roi_xes_start.text()), float(self.roi_xes_end.text())
         except ValueError: ys, ye, xs, xe = y_min, y_max, x_min, x_max
 
-        # Disconnect old selector properly before clearing axes
         if self.selector:
             self.selector.set_active(False)
             self.selector = None
@@ -308,13 +331,8 @@ class RIXSGui(QMainWindow):
         return np.argmin(np.abs(d['x'] - x_s)), np.argmin(np.abs(d['x'] - x_e))
 
     def on_select_roi(self, eclick, erelease):
+        if eclick.xdata is None or erelease.xdata is None: return
         x1, x2 = sorted([eclick.xdata, erelease.xdata]); y1, y2 = sorted([eclick.ydata, erelease.ydata])
-        
-        # BUG FIX 2: Safeguard against double-clicks or zero-width boxes which break the selector
-        if abs(x2 - x1) < 1e-4 or abs(y2 - y1) < 1e-4:
-            self.update_integrations() 
-            return
-            
         self.roi_xes_start.setText(f"{x1:.2f}"); self.roi_xes_end.setText(f"{x2:.2f}"); self.roi_pfy_start.setText(f"{y1:.2f}"); self.roi_pfy_end.setText(f"{y2:.2f}")
         self.update_integrations()
 
@@ -328,7 +346,6 @@ class RIXSGui(QMainWindow):
         
         unit = "Peak Normalized" if self.norm_max_toggle.isChecked() else ("Flux-Corrected Counts" if self.count_toggle.isChecked() else "Normalized Intensity")
         
-        # Current PFY Calculations
         raw_pfy = np.sum(d['z_norm'][:, min(iy_i, iy_f):max(iy_i, iy_f)], axis=1)
         if self.count_toggle.isChecked():
             pfy0_flux = np.sum(d['z_flux'][0, min(iy_i, iy_f):max(iy_i, iy_f)])
@@ -336,14 +353,12 @@ class RIXSGui(QMainWindow):
         else:
             cur_pfy_y = raw_pfy
 
-        # Current XES Calculations
         source_z = d['z_flux'] if self.count_toggle.isChecked() else d['z_norm']
         cur_xes_x = np.sum(source_z[min(ix_i, ix_f):max(ix_i, ix_f), :], axis=0)
 
         self.ax_pfy.clear(); self.ax_xes.clear(); self.ax_leg.clear(); self.ax_leg.axis('off')
         active_label = self.scan_tree.selectedItems()[0].text(0) if self.scan_tree.selectedItems() else "Active"
 
-        # Plot Held Curves
         for px, py, col, lbl in self.held_pfy:
             if lbl != active_label: 
                 plot_y = py / np.max(py) if (self.norm_max_toggle.isChecked() and np.max(py) != 0) else py
@@ -354,7 +369,6 @@ class RIXSGui(QMainWindow):
                 plot_x = xx / np.max(xx) if (self.norm_max_toggle.isChecked() and np.max(xx) != 0) else xx
                 self.ax_xes.plot(plot_x, xy, color=col, alpha=0.6, linestyle='--')
 
-        # Plot Active Curve
         act_col = self.color_cycle[self.current_color_idx % len(self.color_cycle)]
         plot_cur_pfy_y = cur_pfy_y / np.max(cur_pfy_y) if (self.norm_max_toggle.isChecked() and np.max(cur_pfy_y) != 0) else cur_pfy_y
         plot_cur_xes_x = cur_xes_x / np.max(cur_xes_x) if (self.norm_max_toggle.isChecked() and np.max(cur_xes_x) != 0) else cur_xes_x
@@ -362,9 +376,9 @@ class RIXSGui(QMainWindow):
         self.ax_pfy.plot(d['x'], plot_cur_pfy_y, color=act_col, linewidth=2, label=active_label)
         self.ax_xes.plot(plot_cur_xes_x, d['y'], color=act_col, linewidth=2)
 
-        # Legend Handling
-        if self.hold_toggle.isChecked() or self.held_pfy:
-            h, l = self.ax_pfy.get_legend_handles_labels()
+        # Legend Handling - Always Display
+        h, l = self.ax_pfy.get_legend_handles_labels()
+        if h:
             self.ax_leg.legend(h, l, loc='center', fontsize='small', frameon=True)
 
         self.ax_pfy.set_title(f"PFY ({unit})"); self.ax_xes.set_xlabel(unit); self.ax_xes.set_title("XES")
@@ -374,25 +388,45 @@ class RIXSGui(QMainWindow):
         try: xs, xe = float(self.roi_xes_start.text()), float(self.roi_xes_end.text()); ys, ye = float(self.roi_pfy_start.text()), float(self.roi_pfy_end.text())
         except: xs, xe, ys, ye = np.min(d['x']), np.max(d['x']), np.min(d['y']), np.max(d['y'])
         
-        # Spans
         self.ax_pfy.axvspan(xs, xe, color='cyan', alpha=0.1); self.ax_xes.axhspan(ys, ye, color='lime', alpha=0.1)
-        
-        # BUG FIX 2: Safely remove old crosshairs without nuking the RectangleSelector handles
-        for line in self.roi_crosshairs:
-            try: line.remove()
-            except: pass
-        
-        self.roi_crosshairs = [
-            self.ax_map.axhline(ys, color='lime', linestyle='--', linewidth=1),
-            self.ax_map.axhline(ye, color='lime', linestyle='--', linewidth=1),
-            self.ax_map.axvline(xs, color='cyan', linestyle='--', linewidth=1),
-            self.ax_map.axvline(xe, color='cyan', linestyle='--', linewidth=1)
-        ]
-        
-        # Snap the interactive selector back to the inputs to ensure UI remains synced
-        if self.selector: self.selector.extents = (xs, xe, ys, ye)
-        
+        for line in list(self.ax_map.lines): line.remove()
+        self.ax_map.axhline(ys, color='lime', linestyle='--', linewidth=1); self.ax_map.axhline(ye, color='lime', linestyle='--', linewidth=1)
+        self.ax_map.axvline(xs, color='cyan', linestyle='--', linewidth=1); self.ax_map.axvline(xe, color='cyan', linestyle='--', linewidth=1)
         self.canvas.draw()
+
+    def copy_to_clipboard(self, target):
+        if not self.current_data: return
+        buf = io.BytesIO()
+        renderer = self.canvas.get_renderer()
+        
+        try:
+            if target == 'pfy':
+                b1 = self.ax_pfy.get_tightbbox(renderer)
+                leg = self.ax_leg.get_legend()
+                if leg:
+                    b2 = leg.get_window_extent(renderer)
+                    bbox = mtransforms.Bbox.union([b1, b2]).transformed(self.figure.dpi_scale_trans.inverted())
+                else:
+                    bbox = b1.transformed(self.figure.dpi_scale_trans.inverted())
+            elif target == 'xes':
+                bbox = self.ax_xes.get_tightbbox(renderer).transformed(self.figure.dpi_scale_trans.inverted())
+            elif target == 'map':
+                # Strictly isolate the map axis
+                bbox = self.ax_map.get_tightbbox(renderer).transformed(self.figure.dpi_scale_trans.inverted())
+            elif target == 'all':
+                bbox = 'tight'
+            
+            if bbox != 'tight':
+                bbox.x0 -= 0.05; bbox.y0 -= 0.05; bbox.x1 += 0.05; bbox.y1 += 0.05
+                
+            self.figure.savefig(buf, format='png', bbox_inches=bbox)
+            buf.seek(0)
+            img = QtGui.QImage.fromData(buf.getvalue())
+            QApplication.clipboard().setImage(img)
+            self.statusBar().showMessage(f"Copied {target.upper()} graph to clipboard!", 4000)
+            
+        except Exception as e:
+            QMessageBox.warning(self, "Copy Error", f"Failed to copy to clipboard: {e}")
 
     def export_2d_map(self):
         if not self.current_data: return
@@ -409,8 +443,6 @@ class RIXSGui(QMainWindow):
         if not path: return
         try:
             d = self.current_data
-            
-            # --- Export PFY ---
             iy_i, iy_f = self.get_integration_indices()
             raw_pfy = np.sum(d['z_norm'][:, min(iy_i, iy_f):max(iy_i, iy_f)], axis=1)
             
@@ -427,7 +459,6 @@ class RIXSGui(QMainWindow):
                 f.write(f"# PFY [ROI {self.roi_pfy_start.text()}-{self.roi_pfy_end.text()}]\n# Energy(eV)\tIntensity\n")
                 for x, y in zip(d['x'], y_pfy): f.write(f"{x:.6f}\t{y:.6f}\n")
 
-            # --- Export XES ---
             ix_i, ix_f = self.get_excitation_indices()
             source_z = d['z_flux'] if self.count_toggle.isChecked() else d['z_norm']
             x_xes = np.sum(source_z[min(ix_i, ix_f):max(ix_i, ix_f), :], axis=0)
