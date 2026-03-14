@@ -1,6 +1,5 @@
 name: Build and Release RIXS Analyzer
 
-# This workflow triggers automatically when you push a version tag (e.g., v1.0.0)
 on:
   push:
     tags:
@@ -9,13 +8,18 @@ on:
 permissions:
   contents: write
 
+env:
+  # Silences the annoying Node.js 20 deprecation warnings
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
 jobs:
-  build:
+  # --- JOB 1: MAC AND WINDOWS ---
+  build-mac-win:
     name: Build on ${{ matrix.os }}
     runs-on: ${{ matrix.os }}
     strategy:
       matrix:
-        os: [macos-latest, windows-latest, ubuntu-latest]
+        os: [macos-latest, windows-latest]
 
     steps:
     - name: Checkout Code
@@ -24,7 +28,7 @@ jobs:
     - name: Set up Python
       uses: actions/setup-python@v5
       with:
-        python-version: '3.10' # Highly stable version for PyInstaller
+        python-version: '3.10'
 
     - name: Install Dependencies
       run: |
@@ -35,28 +39,75 @@ jobs:
       run: |
         pyinstaller --name "RIXS_Analyzer" --onefile --windowed rixs_gui_matplotlib.py
 
-    # macOS creates a .app directory which GitHub Actions can corrupt if not zipped
     - name: Zip macOS App Bundle
       if: matrix.os == 'macos-latest'
       run: |
         cd dist
         zip -r ../RIXS_Analyzer_macOS.zip RIXS_Analyzer.app
 
-    # Move Windows exe out of dist folder and rename it clearly
     - name: Prepare Windows Executable
       if: matrix.os == 'windows-latest'
       run: Copy-Item -Path "dist\RIXS_Analyzer.exe" -Destination "RIXS_Analyzer_Windows.exe"
 
-    # Move Linux executable out of dist folder and rename it clearly
-    - name: Prepare Linux Executable
-      if: matrix.os == 'ubuntu-latest'
-      run: mv dist/RIXS_Analyzer RIXS_Analyzer_Linux
+    - name: Upload Mac to Actions Page
+      if: matrix.os == 'macos-latest'
+      uses: actions/upload-artifact@v4
+      with:
+        name: RIXS-Analyzer-Mac
+        path: RIXS_Analyzer_macOS.zip
 
-    # Upload everything to the GitHub Release page automatically
-    - name: Upload to GitHub Release
-      uses: softprops/action-gh-release@v1
+    - name: Upload Windows to Actions Page
+      if: matrix.os == 'windows-latest'
+      uses: actions/upload-artifact@v4
+      with:
+        name: RIXS-Analyzer-Windows
+        path: RIXS_Analyzer_Windows.exe
+
+    - name: Upload Mac/Win to Release Page
+      uses: softprops/action-gh-release@v2
       with:
         files: |
           RIXS_Analyzer_macOS.zip
           RIXS_Analyzer_Windows.exe
-          RIXS_Analyzer_Linux
+
+
+  # --- JOB 2: LINUX (ROCKY 9 CONTAINER for GLIBC Compatibility) ---
+  build-linux:
+    name: Build on Linux (Rocky 9)
+    runs-on: ubuntu-latest
+    container: rockylinux:9
+
+    steps:
+    - name: Install System Dependencies
+      run: |
+        dnf update -y
+        dnf install -y git python3 python3-pip gcc python3-devel mesa-libGL glib2
+
+    - name: Configure Git Safe Directory
+      run: git config --global --add safe.directory '*'
+
+    - name: Checkout Code
+      uses: actions/checkout@v4
+
+    - name: Install Python Packages
+      run: |
+        pip3 install --upgrade pip
+        pip3 install pyinstaller numpy matplotlib PyQt6
+
+    - name: Build with PyInstaller
+      run: |
+        pyinstaller --name "RIXS_Analyzer" --onefile --windowed rixs_gui_matplotlib.py
+
+    - name: Prepare Linux Executable
+      run: mv dist/RIXS_Analyzer RIXS_Analyzer_Linux
+
+    - name: Upload Linux to Actions Page
+      uses: actions/upload-artifact@v4
+      with:
+        name: RIXS-Analyzer-Linux
+        path: RIXS_Analyzer_Linux
+
+    - name: Upload Linux to Release Page
+      uses: softprops/action-gh-release@v2
+      with:
+        files: RIXS_Analyzer_Linux
