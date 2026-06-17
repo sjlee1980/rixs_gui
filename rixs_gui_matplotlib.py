@@ -422,7 +422,7 @@ class RIXSGui(QMainWindow):
         ix_i, ix_f = self.get_excitation_indices()
         d = self.current_data
 
-        raw_pfy = np.sum(d['z_norm'][:, min(iy_i, iy_f):max(iy_i, iy_f)], axis=1)
+        raw_pfy = np.sum(d['z_norm'][:len(d['x']), min(iy_i, iy_f):max(iy_i, iy_f)], axis=1)
         if self.count_toggle.isChecked():
             pfy0_flux = np.sum(d['z_flux'][0, min(iy_i, iy_f):max(iy_i, iy_f)])
             y_pfy = raw_pfy * (pfy0_flux / raw_pfy[0]) if raw_pfy[0] != 0 else raw_pfy
@@ -430,7 +430,7 @@ class RIXSGui(QMainWindow):
             y_pfy = raw_pfy
 
         source_z = d['z_flux'] if self.count_toggle.isChecked() else d['z_norm']
-        x_xes = np.sum(source_z[min(ix_i, ix_f):max(ix_i, ix_f), :], axis=0)
+        x_xes = np.sum(source_z[:len(d['x']), min(ix_i, ix_f):max(ix_i, ix_f)], axis=0)
 
         self.held_pfy = [item for item in self.held_pfy if item[3] != label]
         self.held_xes = [item for item in self.held_xes if item[3] != label]
@@ -490,7 +490,14 @@ class RIXSGui(QMainWindow):
 
         self.ax_map.clear()
         disp_z = d['z_flux'] if self.count_toggle.isChecked() else d['z_norm']
-        self.map_img = self.ax_map.pcolormesh(d['x'], d['y'], disp_z.T, shading='auto', cmap=self.cmap_combo.currentText())
+        # Dynamically slice disp_z.T to match the exact lengths of your coordinate arrays
+        self.map_img = self.ax_map.pcolormesh(
+            d['x'], 
+            d['y'], 
+            disp_z.T[:len(d['y']), :len(d['x'])], 
+            shading='auto', 
+            cmap=self.cmap_combo.currentText()
+        )
         self.ax_map.set_xlabel("Incident Energy (eV)"); self.ax_map.set_ylabel("Emission Energy (eV)")
         self.ax_map.set_xlim(x_min, x_max); self.ax_map.set_ylim(y_min, y_max)
         
@@ -579,12 +586,15 @@ class RIXSGui(QMainWindow):
         
         unit = "Peak Normalized" if self.norm_max_toggle.isChecked() else ("Flux-Corrected Counts" if self.count_toggle.isChecked() else "Normalized Intensity")
         
-        raw_pfy = np.sum(d['z_norm'][:, min(iy_i, iy_f):max(iy_i, iy_f)], axis=1)
+        raw_pfy = np.sum(d['z_norm'][:len(d['x']), min(iy_i, iy_f):max(iy_i, iy_f)], axis=1)
         if self.count_toggle.isChecked():
             pfy0_flux = np.sum(d['z_flux'][0, min(iy_i, iy_f):max(iy_i, iy_f)])
             cur_pfy_y = raw_pfy * (pfy0_flux / raw_pfy[0]) if raw_pfy[0] != 0 else raw_pfy
         else:
             cur_pfy_y = raw_pfy
+
+        source_z = d['z_flux'] if self.count_toggle.isChecked() else d['z_norm']
+        cur_xes_x = np.sum(source_z[:len(d['x']), min(ix_i, ix_f):max(ix_i, ix_f)], axis=0)
 
         source_z = d['z_flux'] if self.count_toggle.isChecked() else d['z_norm']
         cur_xes_x = np.sum(source_z[min(ix_i, ix_f):max(ix_i, ix_f), :], axis=0)
