@@ -11,6 +11,17 @@ import matplotlib.transforms as mtransforms
 import matplotlib.gridspec as gridspec
 from matplotlib.widgets import RectangleSelector
 
+# Default fallback string for local development environments
+VERSION = "dev" 
+
+# Validation step to check for an injected version file from the build compiler
+base_path = getattr(sys, '_MEIPASS', os.path.dirname(os.path.abspath(__file__)))
+version_file = os.path.join(base_path, "version.txt")
+
+if os.path.exists(version_file):
+    with open(version_file, "r") as f:
+        VERSION = f.read().strip()
+
 # Suppress NumPy deprecation warnings from unpickling older data
 warnings.filterwarnings("ignore", category=DeprecationWarning, module="numpy")
 
@@ -64,7 +75,7 @@ plt.rc('legend', fontsize=9)
 class RIXSGui(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("RIXS Analyzer v1.0.0")
+        self.setWindowTitle(f"RIXS Analyzer {VERSION}")
         self.setGeometry(50, 50, 1600, 1000)
         self.raw_data = {}
         
@@ -280,9 +291,8 @@ class RIXSGui(QMainWindow):
 
         # --- Compact Canvas Watermark ---
         self.info_text = self.figure.text(0.98, 0.02, 
-            "RIXS Analyzer v1.0.0 | SSRL / SLAC National Accelerator Laboratory | Contact: sangjun2@slac.stanford.edu", 
+            f"RIXS Analyzer {VERSION} | SSRL / SLAC National Accelerator Laboratory | Contact: sangjun2@slac.stanford.edu", 
             ha='right', va='bottom', fontsize=9, color='gray')
-
         self.apply_os_theme()
 
         # ==================== PLOT CONTAINER (With Grid-Aligned Buttons) ====================

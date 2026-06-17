@@ -35,9 +35,14 @@ jobs:
         python -m pip install --upgrade pip
         pip install pyinstaller numpy matplotlib PyQt6
 
+    - name: Inject Version String
+      shell: bash
+      run: echo "${{ github.ref_name }}" > version.txt
+
     - name: Build with PyInstaller
+      shell: bash
       run: |
-        pyinstaller --name "RIXS_Analyzer" --onefile --windowed rixs_gui_matplotlib.py
+        pyinstaller --name "RIXS_Analyzer" --onefile --windowed --add-data "version.txt:." rixs_gui_matplotlib.py
 
     - name: Zip macOS App Bundle
       if: matrix.os == 'macos-latest'
